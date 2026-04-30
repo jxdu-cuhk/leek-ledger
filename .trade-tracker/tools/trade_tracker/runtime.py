@@ -24,9 +24,6 @@ APP_DIR = PROJECT_ROOT / ".trade-tracker"
 CORE_PATH = SCRIPT_DIR / "export_trade_tracker_core.pyc"
 NAME_CACHE_PATH = APP_DIR / "security_name_cache.json"
 HISTORY_DIR = APP_DIR / "history"
-FUTU_HOST = os.environ.get("FUTU_OPEND_HOST", "127.0.0.1")
-FUTU_PORT = int(os.environ.get("FUTU_OPEND_PORT", "11111"))
-
 _PROGRESS_ENABLED = os.environ.get("TRADE_TRACKER_PROGRESS") == "1"
 _LAST_PROGRESS_PERCENT = 0.0
 

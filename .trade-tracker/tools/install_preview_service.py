@@ -39,7 +39,6 @@ PING_URL = f"http://{HOST}:{PORT}/api/ping"
 RUNTIME_PACKAGES = [
     "openpyxl==3.1.5",
     "pandas==3.0.2",
-    "futu_api==10.4.6408",
 ]
 
 
@@ -92,7 +91,7 @@ def runtime_python_has_dependencies() -> bool:
         [
             str(RUNTIME_PYTHON),
             "-c",
-            "import openpyxl, pandas, futu; print('ok')",
+            "import openpyxl, pandas; print('ok')",
         ]
     )
     return result.returncode == 0

@@ -10,7 +10,8 @@ from unittest.mock import patch
 TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
-from trade_tracker.market_data import eastmoney_quote_from_row, parse_hkex_option_detail, tencent_quote_from_payload
+from install_preview_service import RUNTIME_PACKAGES
+from trade_tracker.market_data import eastmoney_quote_from_row, fetch_option_quote, parse_hkex_option_detail, tencent_quote_from_payload
 from trade_tracker.html_tables import add_balanced_summary_table_script, normalize_legacy_holdings_table, normalize_legacy_open_option_sections
 from trade_tracker.options import build_stock_realized_income_maps, open_option_mark_for_row, patch_dashboard_data_with_options
 from trade_tracker import state
@@ -300,6 +301,11 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         self.assertEqual(tencent_quote["last_price"], 372.8)
         self.assertEqual(tencent_quote["prev_close"], 376.02)
 
+    def test_runtime_and_option_quotes_use_public_sources_only(self):
+        self.assertEqual(RUNTIME_PACKAGES, ["openpyxl==3.1.5", "pandas==3.0.2"])
+        with patch("trade_tracker.market_data.fetch_hkex_option_quote", return_value=None):
+            self.assertIsNone(fetch_option_quote(FakeCore(), "DEMO", "港币", "认购", "2026-05-28", 32))
+
     def test_legacy_public_holdings_table_is_normalized_to_full_columns(self):
         html = """
         <table class="summary-table">
@@ -365,6 +371,7 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         self.assertIn(">814.50</td>", normalized)
         self.assertIn(">196,060.00</td>", normalized)
         self.assertIn("HKEX 等公开行情源", normalized)
+        self.assertNotIn("本地行情客户端", normalized)
 
     def test_summary_table_tone_script_covers_legacy_float_profit_labels(self):
         html = """

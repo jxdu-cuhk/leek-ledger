@@ -21,7 +21,7 @@ from .html_tables import (
     remove_stock_summary_section,
     reorder_table_columns,
 )
-from .market_data import fetch_futu_security_quote, fetch_quote_payload, infer_secid, patch_quote_fetchers
+from .market_data import fetch_quote_payload, infer_secid, patch_quote_fetchers
 from .names import cache_name, load_name_cache, load_workbook_name_map, name_cache_key
 from .options import patch_dashboard_data_with_options
 from .overview import move_dividend_metric_later, optimize_overview_metrics, split_overview_by_currency
@@ -64,9 +64,6 @@ def patch_core(core, workbook_path: Path) -> None:
             return cache_name(core, normalized_ticker, normalized_currency, original_name)
 
         if allow_online and normalized_ticker:
-            futu_quote = fetch_futu_security_quote(core, normalized_ticker, normalized_currency)
-            if isinstance(futu_quote, dict) and futu_quote.get("name"):
-                return cache_name(core, normalized_ticker, normalized_currency, futu_quote["name"])
             secid = infer_secid(core, normalized_ticker, normalized_currency)
             if secid:
                 data = fetch_quote_payload(secid)

@@ -20,7 +20,7 @@
 - `.trade-tracker/tools/trade_tracker/app.py`: 导出流程编排，负责加载核心模块、生成网页、整理输出。
 - `.trade-tracker/tools/trade_tracker/patcher.py`: 把我们自己的持仓、汇总、行情、刷新面板逻辑挂到核心生成器上。
 - `.trade-tracker/tools/trade_tracker/options.py`: 期权和已完成现股收益口径，比如已平仓 covered call、T 出利润归入对应标的并回冲当前持仓成本。
-- `.trade-tracker/tools/trade_tracker/market_data.py`: Futu、东方财富、腾讯行情和汇率获取。
+- `.trade-tracker/tools/trade_tracker/market_data.py`: 东方财富、腾讯、Yahoo、HKEX 行情和汇率获取。
 - `.trade-tracker/tools/trade_tracker/names.py`: 标的名称缓存和历史券商文件映射。
 - `.trade-tracker/tools/trade_tracker/html_tables.py`: 表格列顺序、汇总行、排序和人民币折算汇总。
 - `.trade-tracker/tools/trade_tracker/overview.py`: 总体概览和分币种概览卡片。

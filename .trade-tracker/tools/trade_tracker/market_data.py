@@ -2,18 +2,16 @@ from __future__ import annotations
 
 import json
 import re
-import socket
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from .runtime import FUTU_HOST, FUTU_PORT, emit_progress
+from .runtime import emit_progress
 from .settings import FX_RATE_FALLBACKS_TO_CNY, FX_RATE_SECIDS_TO_CNY, FX_RATE_YAHOO_SYMBOLS_TO_CNY
 from .utils import clean_name, clean_text, parse_float
 
-_FUTU_OPEND_AVAILABLE: bool | None = None
 _FX_RATES_TO_CNY: dict[str, float] | None = None
 MARKET_HTTP_TIMEOUT = 3
 MARKET_BATCH_SIZE = 80
@@ -157,66 +155,7 @@ def current_fx_rates_to_cny() -> dict[str, float]:
     return rates
 
 
-def futu_opend_available() -> bool:
-    global _FUTU_OPEND_AVAILABLE
-    if _FUTU_OPEND_AVAILABLE is not None:
-        return _FUTU_OPEND_AVAILABLE
-    try:
-        with socket.create_connection((FUTU_HOST, FUTU_PORT), timeout=0.25):
-            _FUTU_OPEND_AVAILABLE = True
-    except OSError:
-        _FUTU_OPEND_AVAILABLE = False
-    return _FUTU_OPEND_AVAILABLE
-
-
-def futu_symbol(core, ticker, currency) -> str:
-    normalized_ticker = core.normalize_ticker(ticker, currency)
-    normalized_currency = core.normalize_currency(currency)
-    if normalized_currency == "HKD":
-        return f"HK.{normalized_ticker.zfill(5)}"
-    if normalized_currency == "USD":
-        return f"US.{normalized_ticker.upper()}"
-    if normalized_currency == "CNY" and normalized_ticker.isdigit():
-        market = "SH" if normalized_ticker.startswith(("5", "6", "9")) else "SZ"
-        return f"{market}.{normalized_ticker}"
-    return ""
-
-
-def fetch_futu_security_quote(core, ticker, currency) -> dict | None:
-    if not futu_opend_available():
-        return None
-    symbol = futu_symbol(core, ticker, currency)
-    if not symbol:
-        return None
-    try:
-        import futu as ft
-    except ImportError:
-        return None
-    quote_ctx = ft.OpenQuoteContext(host=FUTU_HOST, port=FUTU_PORT)
-    try:
-        ret, data = quote_ctx.get_market_snapshot([symbol])
-        if ret != ft.RET_OK or data is None or len(data) == 0:
-            return None
-        row = data.iloc[0]
-        name = clean_name(row.get("stock_name") or row.get("name"))
-        last_price = row.get("last_price")
-        prev_close = row.get("prev_close_price") or row.get("prev_close")
-        return {
-            "ticker": core.normalize_ticker(ticker, currency),
-            "name": name,
-            "last_price": float(last_price) if last_price not in ("", None) else None,
-            "prev_close": float(prev_close) if prev_close not in ("", None) else None,
-        }
-    except Exception:
-        return None
-    finally:
-        try:
-            quote_ctx.close()
-        except Exception:
-            pass
-
-
-def futu_option_type_for_event(event: str):
+def option_kind_for_event(event: str):
     text = clean_text(event).lower()
     if text in {"认购", "call"}:
         return "CALL"
@@ -225,7 +164,7 @@ def futu_option_type_for_event(event: str):
     return ""
 
 
-def option_expiry_for_futu(expiry: str) -> str:
+def normalize_option_expiry(expiry: str) -> str:
     text = clean_text(expiry).replace("/", "-").replace(".", "-")
     match = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})$", text)
     if not match:
@@ -249,7 +188,7 @@ def strip_hkex_hanweb_header(text: str) -> str:
 
 
 def hkex_option_type_for_event(event: str) -> str:
-    option_kind = futu_option_type_for_event(event)
+    option_kind = option_kind_for_event(event)
     if option_kind == "CALL":
         return "C"
     if option_kind == "PUT":
@@ -289,7 +228,7 @@ def request_hkex_option_page(data: dict[str, str] | None = None, option_id: str 
 def fetch_hkex_option_id(core, ticker, event, expiry, strike) -> str | None:
     underlying = core.normalize_ticker(ticker, "HKD").zfill(5)
     option_type = hkex_option_type_for_event(str(event or ""))
-    expiry_text = option_expiry_for_futu(str(expiry or ""))
+    expiry_text = normalize_option_expiry(str(expiry or ""))
     strike_text = format_option_strike(strike)
     if not underlying or not option_type or not expiry_text or not strike_text:
         return None
@@ -397,87 +336,8 @@ def fetch_hkex_option_quote(core, ticker, currency, event, expiry, strike) -> di
     }
 
 
-def fetch_futu_option_quote(core, ticker, currency, event, expiry, strike) -> dict | None:
-    if not futu_opend_available():
-        return None
-    underlying = futu_symbol(core, ticker, currency)
-    option_kind = futu_option_type_for_event(str(event or ""))
-    strike_value = parse_float(strike)
-    expiry_text = option_expiry_for_futu(str(expiry or ""))
-    if not underlying or not option_kind or strike_value is None or not expiry_text:
-        return None
-    try:
-        import futu as ft
-    except ImportError:
-        return None
-
-    option_type = ft.OptionType.CALL if option_kind == "CALL" else ft.OptionType.PUT
-    quote_ctx = ft.OpenQuoteContext(host=FUTU_HOST, port=FUTU_PORT)
-    try:
-        ret, data = quote_ctx.get_option_chain(
-            underlying,
-            start=expiry_text,
-            end=expiry_text,
-            option_type=option_type,
-        )
-        if ret != ft.RET_OK or data is None or len(data) == 0:
-            return None
-
-        code = ""
-        closest_row = None
-        closest_distance = None
-        for _index, row in data.iterrows():
-            row_strike = None
-            for column in ("strike_price", "strike", "exercise_price"):
-                row_strike = parse_float(row.get(column))
-                if row_strike is not None:
-                    break
-            if row_strike is None:
-                continue
-            distance = abs(row_strike - strike_value)
-            if closest_distance is None or distance < closest_distance:
-                closest_row = row
-                closest_distance = distance
-        if closest_row is None or closest_distance is None or closest_distance > 0.000001:
-            return None
-
-        for column in ("code", "option_code", "stock_code"):
-            raw_code = closest_row.get(column)
-            if raw_code not in ("", None):
-                code = str(raw_code)
-                break
-
-        last_price = None
-        for column in ("last_price", "cur_price", "price"):
-            last_price = parse_float(closest_row.get(column))
-            if last_price is not None:
-                break
-
-        if code:
-            ret, snapshot = quote_ctx.get_market_snapshot([code])
-            if ret == ft.RET_OK and snapshot is not None and len(snapshot) > 0:
-                snap_row = snapshot.iloc[0]
-                for column in ("last_price", "cur_price", "price"):
-                    snapshot_price = parse_float(snap_row.get(column))
-                    if snapshot_price is not None:
-                        last_price = snapshot_price
-                        break
-
-        return {"option_code": code, "last_price": last_price}
-    except Exception:
-        return None
-    finally:
-        try:
-            quote_ctx.close()
-        except Exception:
-            pass
-
-
 def fetch_option_quote(core, ticker, currency, event, expiry, strike) -> dict | None:
-    quote = fetch_hkex_option_quote(core, ticker, currency, event, expiry, strike)
-    if isinstance(quote, dict) and isinstance(quote.get("last_price"), (int, float)):
-        return quote
-    return fetch_futu_option_quote(core, ticker, currency, event, expiry, strike)
+    return fetch_hkex_option_quote(core, ticker, currency, event, expiry, strike)
 
 
 def infer_secid(core, ticker, currency) -> str | None:
@@ -702,11 +562,6 @@ def patch_quote_fetchers(core) -> None:
             security_quote_cache[key] = yahoo_quote
             return yahoo_quote
 
-        futu_quote = fetch_futu_security_quote(core, normalized_ticker, normalized_currency)
-        if quote_has_price(futu_quote):
-            cache_quote_name(core, key, futu_quote)
-            security_quote_cache[key] = futu_quote
-            return futu_quote
         security_quote_cache[key] = {}
         return security_quote_cache[key]
 
