@@ -11,7 +11,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
 from trade_tracker.market_data import eastmoney_quote_from_row, parse_hkex_option_detail, tencent_quote_from_payload
-from trade_tracker.html_tables import normalize_legacy_holdings_table, normalize_legacy_open_option_sections
+from trade_tracker.html_tables import add_balanced_summary_table_script, normalize_legacy_holdings_table, normalize_legacy_open_option_sections
 from trade_tracker.options import build_stock_realized_income_maps, open_option_mark_for_row, patch_dashboard_data_with_options
 from trade_tracker import state
 
@@ -365,6 +365,21 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         self.assertIn(">814.50</td>", normalized)
         self.assertIn(">196,060.00</td>", normalized)
         self.assertIn("HKEX 等公开行情源", normalized)
+
+    def test_summary_table_tone_script_covers_legacy_float_profit_labels(self):
+        html = """
+        <html><body>
+        <table class="summary-table">
+        <thead><tr><th>代码</th><th>浮盈</th><th>成本</th></tr></thead>
+        <tbody><tr><td>DEMO</td><td>123.45</td><td>1,000.00</td></tr></tbody>
+        </table>
+        </body></html>
+        """
+        patched = add_balanced_summary_table_script(html)
+
+        self.assertIn("function applySummaryTableTones", patched)
+        self.assertIn("浮盈|盈亏|收益|分红|年化", patched)
+        self.assertIn("normalized === '回本空间'", patched)
 
 
 if __name__ == "__main__":

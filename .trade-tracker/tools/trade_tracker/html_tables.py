@@ -1078,7 +1078,41 @@ def add_balanced_summary_table_script(html_text: str) -> str:
 
         function refreshSummaryTablesAndWidths() {
           if (typeof updateSummaryTables === 'function') updateSummaryTables();
+          applyAllSummaryTableTones();
           requestAnimationFrame(balanceSummaryTableWidths);
+        }
+
+        function shouldToneSummaryLabel(label) {
+          const normalized = String(label || '').trim();
+          if (!normalized || normalized === '回本空间') return false;
+          return /(浮盈|盈亏|收益|分红|年化)/.test(normalized);
+        }
+
+        function toneClassForSummaryValue(label, text) {
+          const raw = String(text || '').trim();
+          if (!shouldToneSummaryLabel(label) || !raw || raw === '-' || raw === '--' || raw === '已回本') return '';
+          const value = parseSortableValue(raw, 'number');
+          if (Number.isNaN(value)) return '';
+          if (value > 0) return 'value-positive';
+          if (value < 0) return 'value-negative';
+          return 'value-zero';
+        }
+
+        function applySummaryTableTones(table) {
+          const headerLabels = tableHeaderLabels(table);
+          table.querySelectorAll('tbody tr, tfoot tr').forEach((row) => {
+            Array.from(row.children).forEach((cell, index) => {
+              const label = headerLabels[index] || '';
+              if (!shouldToneSummaryLabel(label)) return;
+              cell.classList.remove('value-positive', 'value-negative', 'value-zero');
+              const tone = toneClassForSummaryValue(label, cell.textContent || '');
+              if (tone) cell.classList.add(tone);
+            });
+          });
+        }
+
+        function applyAllSummaryTableTones() {
+          document.querySelectorAll('.summary-table').forEach(applySummaryTableTones);
         }
 
         function refineAnnualYearFilter() {
@@ -1093,6 +1127,7 @@ def add_balanced_summary_table_script(html_text: str) -> str:
               });
             }
             if (typeof updateSummaryTable === 'function') updateSummaryTable(table);
+            applySummaryTableTones(table);
             requestAnimationFrame(balanceSummaryTableWidths);
           };
           select.addEventListener('change', applyRefinement);
