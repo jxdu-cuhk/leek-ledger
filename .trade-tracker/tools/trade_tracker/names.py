@@ -10,6 +10,15 @@ from .utils import clean_name, clean_text, normalize_source_code
 _NAME_CACHE: dict[str, str] | None = None
 _NAME_CACHE_DIRTY = False
 
+PROJECT_FALLBACK_NAMES = {
+    "00700": "腾讯控股",
+    "09988": "阿里巴巴-W",
+    "510300": "沪深300ETF",
+    "600000": "浦发银行",
+    "AAPL": "Apple",
+    "MSFT": "Microsoft",
+}
+
 
 def name_cache_key(core, ticker, currency) -> str:
     normalized_currency = core.normalize_currency(currency)
@@ -110,6 +119,8 @@ def iter_history_csvs(core):
 def load_workbook_name_map(core) -> dict[str, str]:
     mapping: dict[str, str] = {}
     for code, name in getattr(core, "LOCAL_FALLBACK_NAMES", {}).items():
+        put_source_name(mapping, code, name)
+    for code, name in PROJECT_FALLBACK_NAMES.items():
         put_source_name(mapping, code, name)
 
     try:

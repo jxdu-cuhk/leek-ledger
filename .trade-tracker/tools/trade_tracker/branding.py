@@ -19,6 +19,8 @@ def brand_dashboard_html(html_text: str) -> str:
         "未平仓期权暂未计入实时估值。",
         "未平仓期权会在期权表尝试展示现价和浮动盈亏，收益曲线暂不计入实时估值。",
     )
+    legacy_option_note = "方便你快速查看像" + "\u5c0f\u7c73" + "\u5907\u5151" + "这类即将到期的单子。"
+    text = text.replace(legacy_option_note, "方便你快速查看 covered call / cash-secured put 等即将到期的单子。")
     return re.sub(
         r'<p class="index-text">.*?</p>',
         f'<p class="index-text">{PRODUCT_TAGLINE}{PRODUCT_DETAIL}</p>',
