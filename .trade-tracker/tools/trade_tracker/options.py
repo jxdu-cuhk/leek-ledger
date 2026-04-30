@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 
 from . import state
+from .dividends import build_dividend_income_maps
 from .market_data import display_currency_label, fetch_option_quote
 from .runtime import emit_progress
 from .settings import OPTION_EVENTS
@@ -393,7 +394,7 @@ def recompute_current_holding_totals(data: dict[str, object]) -> None:
         data[output_key] = format_currency_amounts(amounts)
 
 
-def sync_adjusted_holdings_to_summaries(data: dict[str, object]) -> None:
+def sync_adjusted_holdings_to_summaries(data: dict[str, object], *, dividend_in_holding_cost: bool = False) -> None:
     holdings_by_key = {
         (clean_text(holding.get("ticker")), clean_text(holding.get("currency"))): holding
         for holding in data.get("holdings", []) or []
@@ -414,7 +415,7 @@ def sync_adjusted_holdings_to_summaries(data: dict[str, object]) -> None:
                 continue
             currency_label = clean_text(row.get("currency") or "")
             dividend = parse_display_number(row.get("dividend")) or 0.0
-            total_pnl = adjusted_unrealized + dividend
+            total_pnl = adjusted_unrealized if dividend_in_holding_cost else adjusted_unrealized + dividend
             row["unrealized_pnl"] = format_money_text(currency_label, adjusted_unrealized)
             row["total_pnl_raw"] = total_pnl
             row["total_pnl"] = format_money_text(currency_label, total_pnl)
@@ -431,18 +432,20 @@ def patch_dashboard_data_with_options(core, rows, data: dict[str, object]) -> di
     state.OPEN_OPTION_MARKS = build_open_option_marks(core, rows)
     option_adjustments = build_option_income_maps(core, rows)
     stock_adjustments = build_stock_realized_income_maps(core, rows)
-    if not option_adjustments and not stock_adjustments:
+    dividend_adjustments = build_dividend_income_maps(data)
+    if not option_adjustments and not stock_adjustments and not dividend_adjustments:
         return data
 
     for holding in data.get("holdings", []) or []:
         key = (clean_text(holding.get("ticker")), clean_text(holding.get("currency")))
         option_income = float(option_adjustments.get(key, {}).get("closed_income", 0.0))
         stock_income = float(stock_adjustments.get(key, 0.0))
-        adjust_holding_for_realized_income(holding, option_income + stock_income)
+        dividend_income = float(dividend_adjustments.get(key, 0.0))
+        adjust_holding_for_realized_income(holding, option_income + stock_income + dividend_income)
     recompute_current_holding_totals(data)
-    sync_adjusted_holdings_to_summaries(data)
+    sync_adjusted_holdings_to_summaries(data, dividend_in_holding_cost=True)
 
     note = clean_text(data.get("totals_note") or "")
-    option_note = "已平仓/到期作废期权及已完成现股交易归入对应标的；当前持仓成本按已实现净收益调低，未平仓期权暂不计入。"
+    option_note = "已平仓/到期作废期权、已完成现股交易和分红净额归入对应标的；当前持仓成本按已实现净收益调低，未平仓期权暂不计入。"
     data["totals_note"] = option_note if not note else f"{note}；{option_note}"
     return data

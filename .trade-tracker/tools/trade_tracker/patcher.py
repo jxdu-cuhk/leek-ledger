@@ -5,6 +5,7 @@ from pathlib import Path
 from . import state
 from .analytics import build_holding_days_map, build_last_clear_date_map, build_summary_holding_days_maps
 from .branding import brand_dashboard_html, brand_launcher_html
+from .dividends import load_dividend_events
 from .html_tables import (
     add_balanced_summary_table_script,
     add_holdings_cny_settlement_footer_script,
@@ -38,6 +39,7 @@ def patch_core(core, workbook_path: Path) -> None:
     original_render_root_launcher_html = getattr(core, "render_root_launcher_html", None)
     original_lookup_security_name = core.lookup_security_name
     original_build_dashboard_data = core.build_dashboard_data
+    original_load_dividend_events = getattr(core, "load_dividend_events", None)
     start_fx_rates_prefetch()
     emit_progress("读取名称缓存", "从历史表、券商导出和本地缓存映射标的名称。", 10)
     source_name_map = load_workbook_name_map(core)
@@ -80,6 +82,9 @@ def patch_core(core, workbook_path: Path) -> None:
             return patch_dashboard_data_with_options(core, rows, data)
         return data
 
+    def patched_load_dividend_events():
+        return load_dividend_events(core, workbook_path, original_load_dividend_events)
+
     def render_summary_table(headers, rows, empty_message, summary_kind="", raw_rows=None):
         html = original_render_summary_table(headers, rows, empty_message, summary_kind, raw_rows)
         if summary_kind == "stock":
@@ -121,5 +126,6 @@ def patch_core(core, workbook_path: Path) -> None:
     if original_render_root_launcher_html:
         core.render_root_launcher_html = render_root_launcher_html
     core.build_dashboard_data = build_dashboard_data
+    core.load_dividend_events = patched_load_dividend_events
     core.lookup_security_name = lookup_security_name
     patch_quote_fetchers(core)

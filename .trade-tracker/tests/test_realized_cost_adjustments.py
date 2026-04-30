@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 import unittest
 from datetime import date
 from pathlib import Path
@@ -21,6 +22,7 @@ from trade_tracker.market_data import (
     yahoo_quote_from_result,
 )
 from trade_tracker.html_tables import add_balanced_summary_table_script, normalize_legacy_holdings_table, normalize_legacy_open_option_sections
+from trade_tracker.dividends import DIVIDEND_SHEET_NAME, load_workbook_dividend_events
 from trade_tracker.options import build_stock_realized_income_maps, open_option_mark_for_row, patch_dashboard_data_with_options
 from trade_tracker import state
 
@@ -64,6 +66,14 @@ class FakeCore:
     def normalize_currency(currency):
         mapping = {"人民币": "CNY", "港币": "HKD", "美元": "USD"}
         return mapping.get(str(currency or "").strip(), str(currency or "").strip().upper())
+
+    @staticmethod
+    def infer_currency_from_ticker(ticker):
+        return "CNY"
+
+    @staticmethod
+    def lookup_security_name(ticker, currency="", allow_online=False):
+        return str(ticker or "").strip().upper()
 
     @staticmethod
     def compute_row_metrics(cells):
@@ -205,6 +215,78 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         self.assertEqual(patched["stock_summary"][0]["total_pnl"], "人民币 1,895.00")
         self.assertEqual(patched["annual_summary"][0]["total_pnl"], "人民币 1,895.00")
         self.assertEqual(patched["annual_summary"][1]["total_pnl"], "人民币 -50.00")
+
+    def test_dividend_income_reduces_current_holding_cost_without_double_counting(self):
+        current_year = str(date.today().year)
+        data = {
+            "holdings": [
+                {
+                    "ticker": "TICKER_A",
+                    "currency": "人民币",
+                    "side": "多头",
+                    "qty": "1000",
+                    "all_in_cost": "人民币 10,000.00",
+                    "avg_cost": "人民币 10.00",
+                    "market_value": "人民币 10,500.00",
+                    "last_price": "人民币 10.50",
+                    "float_pnl": "人民币 500.00",
+                    "daily_pnl": "人民币 0.00",
+                }
+            ],
+            "stock_summary": [
+                {
+                    "ticker": "TICKER_A",
+                    "currency": "人民币",
+                    "dividend": "人民币 200.00",
+                    "unrealized_pnl": "人民币 500.00",
+                    "total_pnl": "人民币 700.00",
+                    "capital_raw": 10_000.0,
+                    "capital_days_raw": 100_000.0,
+                }
+            ],
+            "annual_summary": [
+                {
+                    "year": current_year,
+                    "ticker": "TICKER_A",
+                    "currency": "人民币",
+                    "dividend": "人民币 200.00",
+                    "unrealized_pnl": "人民币 500.00",
+                    "total_pnl": "人民币 700.00",
+                    "capital_raw": 10_000.0,
+                    "capital_days_raw": 100_000.0,
+                }
+            ],
+        }
+
+        patched = patch_dashboard_data_with_options(FakeCore(), [], data)
+        holding = patched["holdings"][0]
+
+        self.assertEqual(holding["all_in_cost"], "人民币 9,800.00")
+        self.assertEqual(holding["avg_cost"], "人民币 9.80")
+        self.assertEqual(holding["float_pnl"], "人民币 700.00")
+        self.assertEqual(patched["stock_summary"][0]["dividend"], "人民币 200.00")
+        self.assertEqual(patched["stock_summary"][0]["total_pnl"], "人民币 700.00")
+        self.assertEqual(patched["annual_summary"][0]["total_pnl"], "人民币 700.00")
+
+    def test_workbook_dividend_sheet_is_loaded_as_events(self):
+        from openpyxl import Workbook
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "tracker.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = DIVIDEND_SHEET_NAME
+            sheet.append(["日期", "代码", "名称", "事件", "金额", "币种", "来源", "原始行"])
+            sheet.append(["2026-02-03", "600000", "示例银行", "除权除息", 123.45, "人民币", "示例券商.xlsx", 8])
+            workbook.save(path)
+
+            events = load_workbook_dividend_events(FakeCore(), path)
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["ticker"], "600000")
+        self.assertEqual(events[0]["currency"], "CNY")
+        self.assertEqual(events[0]["amount"], 123.45)
+        self.assertEqual(events[0]["kind"], "除权除息")
 
     def test_short_holding_uses_inverse_cost_direction(self):
         closed_short = row(
