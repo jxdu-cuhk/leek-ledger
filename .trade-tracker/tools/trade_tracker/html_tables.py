@@ -790,6 +790,7 @@ def decorate_and_sort_holding_rows(core, table_html: str) -> str:
     side_index = labels.index("方向")
     currency_index = labels.index("币种")
     breakeven_index = labels.index("回本空间") if "回本空间" in labels else -1
+    days_index = labels.index("持股天数") if "持股天数" in labels else -1
     avg_cost_index = labels.index("持仓均价") if "持仓均价" in labels else -1
     price_index = labels.index("现价") if "现价" in labels else -1
     pnl_index = labels.index("浮动盈亏") if "浮动盈亏" in labels else -1
@@ -825,6 +826,14 @@ def decorate_and_sort_holding_rows(core, table_html: str) -> str:
             weight = exposure / total_exposure if total_exposure else None
             cells[market_value_index] = set_td_sort_value(cells[market_value_index], converted_value)
             cells[position_index] = replace_td_content(cells[position_index], format_percent(weight), weight)
+            if days_index >= 0:
+                try:
+                    currency = core.normalize_currency(cell_text(cells[currency_index]))
+                    ticker = core.normalize_ticker(code, currency)
+                except Exception:
+                    ticker, currency = "", ""
+                days = parse_float(state.HOLDING_DAYS_MAP.get((ticker, currency), ""))
+                cells[days_index] = replace_td_content(cells[days_index], format_compact_number(days, 0), days)
             if breakeven_index >= 0:
                 avg_cost = number_for_label(labels, cells, "持仓均价") if avg_cost_index >= 0 else None
                 price = number_for_label(labels, cells, "现价") if price_index >= 0 else None

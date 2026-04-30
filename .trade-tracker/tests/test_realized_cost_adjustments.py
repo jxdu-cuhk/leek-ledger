@@ -3,7 +3,7 @@ from __future__ import annotations
 import sys
 import tempfile
 import unittest
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -13,6 +13,7 @@ sys.path.insert(0, str(TOOLS_DIR))
 
 from install_preview_service import RUNTIME_PACKAGES
 from trade_tracker import market_data as market_data_module
+from trade_tracker.analytics import build_holding_days_map
 from trade_tracker.market_data import (
     eastmoney_quote_from_row,
     fetch_option_quote,
@@ -22,7 +23,7 @@ from trade_tracker.market_data import (
     tencent_quote_from_payload,
     yahoo_quote_from_result,
 )
-from trade_tracker.html_tables import add_balanced_summary_table_script, normalize_legacy_holdings_table, normalize_legacy_open_option_sections
+from trade_tracker.html_tables import add_balanced_summary_table_script, insert_holding_metric_columns, normalize_legacy_holdings_table, normalize_legacy_open_option_sections
 from trade_tracker.dividends import DIVIDEND_SHEET_NAME, load_dividend_events, load_workbook_dividend_events
 from trade_tracker.options import build_stock_realized_income_maps, open_option_mark_for_row, patch_dashboard_data_with_options
 from trade_tracker import state
@@ -310,6 +311,26 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         history.assert_not_called()
         self.assertEqual([event["ticker"] for event in events], ["600000"])
 
+    def test_current_holding_days_start_after_last_flat_position(self):
+        from openpyxl import Workbook
+
+        today = date.today()
+        current_start = today - timedelta(days=40)
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            path = Path(tmp_dir) / "tracker.xlsx"
+            workbook = Workbook()
+            sheet = workbook.active
+            sheet.title = "交易记录"
+            sheet.append(["类型", "开仓", "平仓", "代码", "名称", "事件", "数量", "币种"])
+            sheet.append(["股票", today - timedelta(days=100), today - timedelta(days=90), "DEMO", "示例标的", "现股", 100, "人民币"])
+            sheet.append(["股票", current_start, None, "DEMO", "示例标的", "现股", 100, "人民币"])
+            sheet.append(["股票", today - timedelta(days=5), None, "DEMO", "示例标的", "现股", 50, "人民币"])
+            workbook.save(path)
+
+            days = build_holding_days_map(FakeCore(), path)
+
+        self.assertEqual(days[("DEMO", "CNY")], "40")
+
     def test_short_holding_uses_inverse_cost_direction(self):
         closed_short = row(
             kind="卖出",
@@ -556,6 +577,23 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         self.assertIn("value-positive", normalized)
         self.assertIn(">多头</td>", normalized)
         self.assertIn(">美元</td>", normalized)
+
+    def test_existing_holding_days_column_uses_current_position_start(self):
+        previous = dict(state.HOLDING_DAYS_MAP)
+        state.HOLDING_DAYS_MAP = {("DEMO", "CNY"): "113"}
+        html = """
+        <table class="summary-table">
+        <thead><tr><th>代码</th><th>名称</th><th>最新市值</th><th>浮动盈亏</th><th>盈亏率</th><th>持股数</th><th>现价</th><th>持仓成本</th><th>当日盈亏</th><th>个股仓位</th><th>持股天数</th><th>持仓均价</th><th>回本空间</th><th>方向</th><th>币种</th><th>最近买入</th></tr></thead>
+        <tbody><tr><td>DEMO</td><td>示例标的</td><td>人民币 930,653.42</td><td>人民币 -42,283.12</td><td>-4.35%</td><td>22291.1</td><td>41.75</td><td>人民币 972,936.54</td><td>人民币 58,848.50</td><td>34.21%</td><td>4</td><td>43.647</td><td>+4.54%</td><td>多头</td><td>人民币</td><td>2026/04/27</td></tr></tbody>
+        </table>
+        """
+        try:
+            updated = insert_holding_metric_columns(FakeCore(), html)
+        finally:
+            state.HOLDING_DAYS_MAP = previous
+
+        self.assertIn(">113<", updated)
+        self.assertNotIn(">4</td>", updated)
 
     def test_legacy_public_open_option_table_is_normalized_to_full_columns(self):
         html = """

@@ -90,27 +90,41 @@ def build_holding_days_map(core, workbook_path: Path) -> dict[tuple[str, str], s
             return {}
 
         today = date.today()
-        first_open_by_key: dict[tuple[str, str], date] = {}
+        events_by_key: dict[tuple[str, str], list[tuple[date, int, float]]] = {}
         for row in rows:
             event = clean_text(row[header_map["事件"]] if header_map["事件"] < len(row) else "")
             if event != "现股":
                 continue
-            if date_key(row[header_map["平仓"]] if header_map["平仓"] < len(row) else None):
-                continue
             quantity = parse_float(row[header_map["数量"]] if header_map["数量"] < len(row) else None)
             open_date = date_key(row[header_map["开仓"]] if header_map["开仓"] < len(row) else None)
+            close_date = date_key(row[header_map["平仓"]] if header_map["平仓"] < len(row) else None)
             currency = core.normalize_currency(row[header_map["币种"]] if header_map["币种"] < len(row) else "")
             ticker = core.normalize_ticker(row[header_map["代码"]] if header_map["代码"] < len(row) else None, currency)
             if not ticker or not currency or quantity in (None, 0) or not open_date:
                 continue
             key = (ticker, currency)
-            if key not in first_open_by_key or open_date < first_open_by_key[key]:
-                first_open_by_key[key] = open_date
+            type_index = header_map.get("类型")
+            trade_type = clean_text(row[type_index] if type_index is not None and type_index < len(row) else "")
+            signed_quantity = -abs(quantity) if trade_type in {"卖出", "卖空"} else quantity
+            events_by_key.setdefault(key, []).append((open_date, 0, signed_quantity))
+            if close_date:
+                events_by_key[key].append((close_date, 1, -signed_quantity))
 
-        return {
-            key: str(max((today - open_date).days, 0))
-            for key, open_date in first_open_by_key.items()
-        }
+        holding_days: dict[tuple[str, str], str] = {}
+        for key, events in events_by_key.items():
+            position = 0.0
+            active_start = None
+            for event_date, _order, delta in sorted(events, key=lambda item: (item[0], item[1])):
+                was_flat = abs(position) < 0.000001
+                position += delta
+                is_flat = abs(position) < 0.000001
+                if was_flat and not is_flat:
+                    active_start = event_date
+                elif not was_flat and is_flat:
+                    active_start = None
+            if active_start is not None and abs(position) >= 0.000001:
+                holding_days[key] = str(max((today - active_start).days, 0))
+        return holding_days
     finally:
         workbook.close()
 
