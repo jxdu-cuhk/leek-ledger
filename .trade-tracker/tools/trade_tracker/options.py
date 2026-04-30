@@ -155,7 +155,7 @@ def prefetch_open_option_quotes(core, candidates: list[dict[int, object]]) -> di
     if not requests:
         return quote_cache
 
-    workers = min(3, len(requests))
+    workers = min(6, len(requests))
     completed = 0
     with ThreadPoolExecutor(max_workers=workers) as executor:
         future_map = {

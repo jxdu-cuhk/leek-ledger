@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from urllib.error import URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -13,10 +13,17 @@ from .settings import FX_RATE_FALLBACKS_TO_CNY, FX_RATE_SECIDS_TO_CNY, FX_RATE_Y
 from .utils import clean_name, clean_text, parse_float
 
 _FX_RATES_TO_CNY: dict[str, float] | None = None
+_FX_RATES_FUTURE: Future | None = None
+_MARKET_DATA_EXECUTOR: ThreadPoolExecutor | None = None
 MARKET_HTTP_TIMEOUT = 3
+EASTMONEY_HTTP_TIMEOUT = 2
+HKEX_HTTP_TIMEOUT = 3
+HKEX_REQUEST_RETRIES = 2
 MARKET_BATCH_SIZE = 80
+YAHOO_BATCH_SIZE = 50
 EASTMONEY_BATCH_FIELDS = "f12,f13,f14,f2,f1,f18"
 EASTMONEY_SINGLE_FIELDS = "f57,f58,f43,f59,f60"
+_HKEX_OPTION_ID_CACHE: dict[tuple[str, str, str, str], str | None] = {}
 
 
 def chunks(items, size: int = MARKET_BATCH_SIZE):
@@ -159,11 +166,14 @@ def fetch_yahoo_fx_rates_to_cny(symbols_by_currency: dict[str, str]) -> dict[str
     return rates
 
 
-def current_fx_rates_to_cny() -> dict[str, float]:
-    global _FX_RATES_TO_CNY
-    if _FX_RATES_TO_CNY is not None:
-        return _FX_RATES_TO_CNY
+def market_data_executor() -> ThreadPoolExecutor:
+    global _MARKET_DATA_EXECUTOR
+    if _MARKET_DATA_EXECUTOR is None:
+        _MARKET_DATA_EXECUTOR = ThreadPoolExecutor(max_workers=4)
+    return _MARKET_DATA_EXECUTOR
 
+
+def compute_fx_rates_to_cny() -> dict[str, float]:
     emit_progress("读取汇率", "用于把不同币种的持仓仓位合并排序。", 38)
     rates = dict(FX_RATE_FALLBACKS_TO_CNY)
     rates["人民币"] = 1.0
@@ -185,8 +195,28 @@ def current_fx_rates_to_cny() -> dict[str, float]:
             rate = yahoo_rates.get(currency)
         if isinstance(rate, (int, float)) and rate > 0:
             rates[currency] = float(rate)
-    _FX_RATES_TO_CNY = rates
     return rates
+
+
+def start_fx_rates_prefetch() -> None:
+    global _FX_RATES_FUTURE
+    if _FX_RATES_TO_CNY is not None or _FX_RATES_FUTURE is not None:
+        return
+    _FX_RATES_FUTURE = market_data_executor().submit(compute_fx_rates_to_cny)
+
+
+def current_fx_rates_to_cny() -> dict[str, float]:
+    global _FX_RATES_FUTURE, _FX_RATES_TO_CNY
+    if _FX_RATES_TO_CNY is not None:
+        return _FX_RATES_TO_CNY
+    if _FX_RATES_FUTURE is not None:
+        try:
+            _FX_RATES_TO_CNY = _FX_RATES_FUTURE.result()
+            return _FX_RATES_TO_CNY
+        except Exception:
+            _FX_RATES_FUTURE = None
+    _FX_RATES_TO_CNY = compute_fx_rates_to_cny()
+    return _FX_RATES_TO_CNY
 
 
 def option_kind_for_event(event: str):
@@ -230,7 +260,12 @@ def hkex_option_type_for_event(event: str) -> str:
     return ""
 
 
-def request_hkex_option_page(data: dict[str, str] | None = None, option_id: str | None = None, ucode: str = "") -> str:
+def request_hkex_option_page(
+    data: dict[str, str] | None = None,
+    option_id: str | None = None,
+    ucode: str = "",
+    retries: int = HKEX_REQUEST_RETRIES,
+) -> str:
     base_url = "https://www.hkex.com.hk/eng/sorc/options/stock_options_detail.aspx"
     if option_id:
         url = f"{base_url}?oID={option_id}&ucode={ucode}"
@@ -246,13 +281,13 @@ def request_hkex_option_page(data: dict[str, str] | None = None, option_id: str 
             },
         )
     last_error = None
-    for attempt in range(3):
+    for attempt in range(max(1, retries)):
         try:
-            with urlopen(request, timeout=6) as response:
+            with urlopen(request, timeout=HKEX_HTTP_TIMEOUT) as response:
                 return response.read().decode("utf-8", "ignore")
         except (TimeoutError, URLError, OSError) as error:
             last_error = error
-            if attempt < 2:
+            if attempt < retries - 1:
                 time.sleep(0.15 * (attempt + 1))
     if last_error:
         raise last_error
@@ -266,6 +301,9 @@ def fetch_hkex_option_id(core, ticker, event, expiry, strike) -> str | None:
     strike_text = format_option_strike(strike)
     if not underlying or not option_type or not expiry_text or not strike_text:
         return None
+    cache_key = (underlying, option_type, expiry_text, strike_text)
+    if cache_key in _HKEX_OPTION_ID_CACHE:
+        return _HKEX_OPTION_ID_CACHE[cache_key]
 
     try:
         html = request_hkex_option_page(
@@ -281,12 +319,15 @@ def fetch_hkex_option_id(core, ticker, event, expiry, strike) -> str | None:
             }
         )
     except (TimeoutError, URLError, OSError):
+        _HKEX_OPTION_ID_CACHE[cache_key] = None
         return None
 
     html = strip_hkex_hanweb_header(html)
     match = re.search(r"oID=(\d+)&ucode=" + re.escape(underlying), html)
     if match:
-        return match.group(1)
+        _HKEX_OPTION_ID_CACHE[cache_key] = match.group(1)
+        return _HKEX_OPTION_ID_CACHE[cache_key]
+    _HKEX_OPTION_ID_CACHE[cache_key] = None
     return None
 
 
@@ -347,14 +388,14 @@ def fetch_hkex_option_quote(core, ticker, currency, event, expiry, strike) -> di
     if not option_id:
         return None
     try:
-        html = request_hkex_option_page(option_id=option_id, ucode=underlying)
+        html = request_hkex_option_page(option_id=option_id, ucode=underlying, retries=1)
     except (TimeoutError, URLError, OSError):
         html = ""
     last_price, as_of = parse_hkex_option_detail(html)
     if last_price is None:
-        for _attempt in range(2):
+        for _attempt in range(1):
             try:
-                html = request_hkex_option_page(option_id=option_id, ucode=underlying)
+                html = request_hkex_option_page(option_id=option_id, ucode=underlying, retries=1)
             except (TimeoutError, URLError, OSError):
                 continue
             last_price, as_of = parse_hkex_option_detail(html)
@@ -407,13 +448,31 @@ def fetch_eastmoney_batch_payload(secids, fields: str = EASTMONEY_BATCH_FIELDS) 
     )
     request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
     try:
-        with urlopen(request, timeout=MARKET_HTTP_TIMEOUT) as response:
+        with urlopen(request, timeout=EASTMONEY_HTTP_TIMEOUT) as response:
             payload = json.loads(response.read().decode("utf-8", "ignore"))
     except (TimeoutError, URLError, OSError, ValueError):
         return []
     data = payload.get("data") if isinstance(payload, dict) else None
     rows = data.get("diff") if isinstance(data, dict) else None
     return rows if isinstance(rows, list) else []
+
+
+def fetch_eastmoney_batch_payloads(secids, fields: str = EASTMONEY_BATCH_FIELDS) -> list[dict]:
+    secid_groups = list(chunks(secids))
+    if not secid_groups:
+        return []
+    if len(secid_groups) == 1:
+        return fetch_eastmoney_batch_payload(secid_groups[0], fields)
+    rows: list[dict] = []
+    workers = min(4, len(secid_groups))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(fetch_eastmoney_batch_payload, group, fields): group for group in secid_groups}
+        for future in as_completed(future_map):
+            try:
+                rows.extend(future.result())
+            except Exception:
+                continue
+    return rows
 
 
 def fetch_eastmoney_security_quotes(core, keys) -> dict[tuple[str, str], dict]:
@@ -431,18 +490,17 @@ def fetch_eastmoney_security_quotes(core, keys) -> dict[tuple[str, str], dict]:
         lookup_to_key[(market, code)] = key
 
     quotes: dict[tuple[str, str], dict] = {}
-    for secid_group in chunks(secid_to_key):
-        rows = fetch_eastmoney_batch_payload(secid_group)
-        for row in rows:
-            if not isinstance(row, dict):
-                continue
-            key = lookup_to_key.get(eastmoney_row_lookup_key(row))
-            if not key:
-                continue
-            quote = eastmoney_quote_from_row(core, key, row)
-            if quote_has_price(quote):
-                cache_quote_name(core, key, quote)
-                quotes[key] = quote
+    rows = fetch_eastmoney_batch_payloads(secid_to_key)
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        key = lookup_to_key.get(eastmoney_row_lookup_key(row))
+        if not key:
+            continue
+        quote = eastmoney_quote_from_row(core, key, row)
+        if quote_has_price(quote):
+            cache_quote_name(core, key, quote)
+            quotes[key] = quote
     return quotes
 
 
@@ -454,7 +512,7 @@ def fetch_quote_payload(secid: str) -> dict | None:
     for url in urls:
         request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
-            with urlopen(request, timeout=MARKET_HTTP_TIMEOUT) as response:
+            with urlopen(request, timeout=EASTMONEY_HTTP_TIMEOUT) as response:
                 payload = json.loads(response.read().decode("utf-8", "ignore"))
             data = payload.get("data") if isinstance(payload, dict) else None
             if isinstance(data, dict):
@@ -502,15 +560,17 @@ def fetch_tencent_security_quotes(core, keys) -> dict[tuple[str, str], dict]:
         symbol = tencent_symbol(core, key[0], key[1])
         if symbol:
             symbol_to_key[symbol] = key
-    quotes: dict[tuple[str, str], dict] = {}
-    for symbol_group in chunks(symbol_to_key):
+    if not symbol_to_key:
+        return {}
+    def fetch_group(symbol_group) -> dict[tuple[str, str], dict]:
+        group_quotes: dict[tuple[str, str], dict] = {}
         url = f"https://qt.gtimg.cn/q={','.join(symbol_group)}"
         request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
         try:
             with urlopen(request, timeout=MARKET_HTTP_TIMEOUT) as response:
                 text = response.read().decode("gb18030", "ignore")
         except (TimeoutError, URLError, OSError, ValueError):
-            continue
+            return group_quotes
         for symbol, payload in re.findall(r"v_([^=]+)=\"([^\"]*)\"", text):
             key = symbol_to_key.get(symbol)
             if not key:
@@ -518,7 +578,21 @@ def fetch_tencent_security_quotes(core, keys) -> dict[tuple[str, str], dict]:
             quote = tencent_quote_from_payload(core, key, payload)
             if quote_has_price(quote):
                 cache_quote_name(core, key, quote)
-                quotes[key] = quote
+                group_quotes[key] = quote
+        return group_quotes
+
+    quotes: dict[tuple[str, str], dict] = {}
+    symbol_groups = list(chunks(symbol_to_key))
+    if len(symbol_groups) == 1:
+        return fetch_group(symbol_groups[0])
+    workers = min(4, len(symbol_groups))
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        future_map = {executor.submit(fetch_group, group): group for group in symbol_groups}
+        for future in as_completed(future_map):
+            try:
+                quotes.update(future.result())
+            except Exception:
+                continue
     return quotes
 
 
@@ -560,6 +634,58 @@ def fetch_yahoo_security_quote(core, ticker, currency) -> dict | None:
         }
     except (KeyError, IndexError, TypeError):
         return None
+
+
+def yahoo_quote_from_result(core, key: tuple[str, str], result: dict) -> dict | None:
+    last_price = result.get("regularMarketPrice")
+    if not isinstance(last_price, (int, float)):
+        return None
+    prev_close = (
+        result.get("regularMarketPreviousClose")
+        or result.get("previousClose")
+        or result.get("chartPreviousClose")
+    )
+    name = clean_name(result.get("shortName") or result.get("longName") or result.get("displayName") or key[0])
+    return {
+        "ticker": key[0],
+        "name": name,
+        "last_price": float(last_price),
+        "prev_close": float(prev_close) if isinstance(prev_close, (int, float)) else None,
+        "source": "Yahoo",
+    }
+
+
+def fetch_yahoo_security_quotes(core, keys) -> dict[tuple[str, str], dict]:
+    symbol_to_key: dict[str, tuple[str, str]] = {}
+    for ticker, currency in keys:
+        key = normalize_quote_key(core, ticker, currency)
+        if key[1] == "USD" and key[0]:
+            symbol_to_key[key[0].upper()] = key
+    if not symbol_to_key:
+        return {}
+
+    quotes: dict[tuple[str, str], dict] = {}
+    for symbol_group in chunks(symbol_to_key, YAHOO_BATCH_SIZE):
+        url = "https://query1.finance.yahoo.com/v7/finance/quote?" + urlencode({"symbols": ",".join(symbol_group)})
+        request = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        try:
+            with urlopen(request, timeout=MARKET_HTTP_TIMEOUT) as response:
+                payload = json.loads(response.read().decode("utf-8", "ignore"))
+        except (TimeoutError, URLError, OSError, ValueError):
+            continue
+        results = ((payload.get("quoteResponse") or {}).get("result") or []) if isinstance(payload, dict) else []
+        for result in results:
+            if not isinstance(result, dict):
+                continue
+            symbol = clean_text(result.get("symbol")).upper()
+            key = symbol_to_key.get(symbol)
+            if not key:
+                continue
+            quote = yahoo_quote_from_result(core, key, result)
+            if quote_has_price(quote):
+                cache_quote_name(core, key, quote)
+                quotes[key] = quote
+    return quotes
 
 
 def patch_quote_fetchers(core) -> None:
@@ -613,18 +739,24 @@ def patch_quote_fetchers(core) -> None:
         total = len(sorted_keys)
         emit_progress("获取行情", f"批量获取 {len(fetch_keys)} 个标的的公开行情。", 42)
 
-        quotes.update(fetch_eastmoney_security_quotes(core, fetch_keys))
-        for key, quote in quotes.items():
-            if key in fetch_keys:
-                security_quote_cache[key] = quote
-        emit_progress("获取行情", f"东方财富批量行情完成，已取到 {len(quotes)}/{total}。", 52)
+        tencent_quotes = fetch_tencent_security_quotes(core, fetch_keys)
+        quotes.update(tencent_quotes)
+        security_quote_cache.update(tencent_quotes)
+        emit_progress("获取行情", f"腾讯批量行情完成，已取到 {sum(1 for key in sorted_keys if quote_has_price(quotes.get(key)))}/{total}。", 52)
 
         missing_keys = [key for key in fetch_keys if not quote_has_price(quotes.get(key))]
         if missing_keys:
-            tencent_quotes = fetch_tencent_security_quotes(core, missing_keys)
-            quotes.update(tencent_quotes)
-            security_quote_cache.update(tencent_quotes)
-            emit_progress("获取行情", f"腾讯行情兜底完成，已取到 {sum(1 for key in sorted_keys if quote_has_price(quotes.get(key)))}/{total}。", 60)
+            eastmoney_quotes = fetch_eastmoney_security_quotes(core, missing_keys)
+            quotes.update(eastmoney_quotes)
+            security_quote_cache.update(eastmoney_quotes)
+            emit_progress("获取行情", f"东方财富补充行情完成，已取到 {sum(1 for key in sorted_keys if quote_has_price(quotes.get(key)))}/{total}。", 60)
+
+        missing_keys = [key for key in fetch_keys if not quote_has_price(quotes.get(key))]
+        if missing_keys:
+            yahoo_quotes = fetch_yahoo_security_quotes(core, missing_keys)
+            quotes.update(yahoo_quotes)
+            security_quote_cache.update(yahoo_quotes)
+            emit_progress("获取行情", f"Yahoo 美股批量行情完成，已取到 {sum(1 for key in sorted_keys if quote_has_price(quotes.get(key)))}/{total}。", 64)
 
         missing_keys = [key for key in fetch_keys if not quote_has_price(quotes.get(key))]
         if missing_keys:
@@ -643,7 +775,7 @@ def patch_quote_fetchers(core) -> None:
                         quotes[(ticker, currency)] = {}
                     security_quote_cache[(ticker, currency)] = quotes[(ticker, currency)]
                     completed += 1
-                    percent = 60 + (completed / len(missing_keys)) * 8
+                    percent = 64 + (completed / len(missing_keys)) * 4
                     emit_progress("获取行情", f"补充行情 {completed}/{len(missing_keys)}：{ticker}", percent)
 
         for ticker, currency in sorted_keys:

@@ -21,7 +21,7 @@ from .html_tables import (
     remove_stock_summary_section,
     reorder_table_columns,
 )
-from .market_data import fetch_quote_payload, infer_secid, patch_quote_fetchers
+from .market_data import fetch_quote_payload, infer_secid, patch_quote_fetchers, start_fx_rates_prefetch
 from .names import cache_name, load_name_cache, load_workbook_name_map, name_cache_key
 from .options import patch_dashboard_data_with_options
 from .overview import move_dividend_metric_later, optimize_overview_metrics, split_overview_by_currency
@@ -38,6 +38,7 @@ def patch_core(core, workbook_path: Path) -> None:
     original_render_root_launcher_html = getattr(core, "render_root_launcher_html", None)
     original_lookup_security_name = core.lookup_security_name
     original_build_dashboard_data = core.build_dashboard_data
+    start_fx_rates_prefetch()
     emit_progress("读取名称缓存", "从历史表、券商导出和本地缓存映射标的名称。", 10)
     source_name_map = load_workbook_name_map(core)
     emit_progress("分析交易记录", "计算每只标的最后一次清仓时间。", 18)

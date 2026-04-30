@@ -11,12 +11,14 @@ TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
 from install_preview_service import RUNTIME_PACKAGES
+from trade_tracker import market_data as market_data_module
 from trade_tracker.market_data import (
     eastmoney_quote_from_row,
     fetch_option_quote,
     fetch_yahoo_fx_rates_to_cny,
     parse_hkex_option_detail,
     tencent_quote_from_payload,
+    yahoo_quote_from_result,
 )
 from trade_tracker.html_tables import add_balanced_summary_table_script, normalize_legacy_holdings_table, normalize_legacy_open_option_sections
 from trade_tracker.options import build_stock_realized_income_maps, open_option_mark_for_row, patch_dashboard_data_with_options
@@ -307,6 +309,15 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         self.assertEqual(tencent_quote["last_price"], 372.8)
         self.assertEqual(tencent_quote["prev_close"], 376.02)
 
+        yahoo_quote = yahoo_quote_from_result(
+            FakeCore(),
+            ("AAPL", "USD"),
+            {"symbol": "AAPL", "shortName": "Apple Inc.", "regularMarketPrice": 269.53, "regularMarketPreviousClose": 270.17},
+        )
+        self.assertEqual(yahoo_quote["name"], "Apple Inc.")
+        self.assertEqual(yahoo_quote["last_price"], 269.53)
+        self.assertEqual(yahoo_quote["prev_close"], 270.17)
+
     def test_runtime_and_option_quotes_use_public_sources_only(self):
         self.assertEqual(RUNTIME_PACKAGES, ["openpyxl==3.1.5", "pandas==3.0.2"])
         with patch("trade_tracker.market_data.fetch_hkex_option_quote", return_value=None):
@@ -320,6 +331,21 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
             rates = fetch_yahoo_fx_rates_to_cny({"港币": "HKDCNY=X", "美元": "USDCNY=X", "空": ""})
 
         self.assertEqual(rates, {"港币": 0.92, "美元": 7.20})
+
+    def test_fx_prefetch_result_is_reused(self):
+        previous_rates = market_data_module._FX_RATES_TO_CNY
+        previous_future = market_data_module._FX_RATES_FUTURE
+        market_data_module._FX_RATES_TO_CNY = None
+        market_data_module._FX_RATES_FUTURE = None
+        try:
+            with patch("trade_tracker.market_data.compute_fx_rates_to_cny", return_value={"人民币": 1.0, "美元": 7.2}) as compute:
+                market_data_module.start_fx_rates_prefetch()
+                self.assertEqual(market_data_module.current_fx_rates_to_cny()["美元"], 7.2)
+                self.assertEqual(market_data_module.current_fx_rates_to_cny()["美元"], 7.2)
+                compute.assert_called_once()
+        finally:
+            market_data_module._FX_RATES_TO_CNY = previous_rates
+            market_data_module._FX_RATES_FUTURE = previous_future
 
     def test_legacy_public_holdings_table_is_normalized_to_full_columns(self):
         html = """
