@@ -863,7 +863,8 @@ def insert_holding_metric_columns(core, table_html: str) -> str:
     if "代码" not in labels or "币种" not in labels or "最新市值" not in labels:
         return table_html
 
-    currency_totals: dict[str, float] = {}
+    rates = current_fx_rates_to_cny()
+    total_exposure_cny = 0.0
     body_match = re.search(r"<tbody>\s*(.*?)\s*</tbody>", table_html, re.S)
     if body_match:
         for row_match in re.finditer(r"<tr\b[^>]*>(.*?)</tr>", body_match.group(1), re.S):
@@ -876,8 +877,8 @@ def insert_holding_metric_columns(core, table_html: str) -> str:
             currency, value = parsed
             if not currency:
                 currency = cell_text(cells[labels.index("币种")])
-            if currency and currency != "-":
-                currency_totals[currency] = currency_totals.get(currency, 0.0) + abs(value)
+            currency_label = display_currency_label(core, currency)
+            total_exposure_cny += abs(value * rates.get(currency_label, 1.0))
 
     def position_weight(labels: list[str], cells: list[str]) -> str:
         parsed = parse_money_cell(cells[labels.index("最新市值")])
@@ -886,10 +887,11 @@ def insert_holding_metric_columns(core, table_html: str) -> str:
         currency, value = parsed
         if not currency:
             currency = cell_text(cells[labels.index("币种")])
-        total = currency_totals.get(currency or "", 0.0)
-        if not total:
+        currency_label = display_currency_label(core, currency)
+        converted_value = value * rates.get(currency_label, 1.0)
+        if not total_exposure_cny:
             return "-"
-        return format_percent(abs(value) / total)
+        return format_percent(abs(converted_value) / total_exposure_cny)
 
     def holding_days(labels: list[str], cells: list[str]) -> str:
         try:
@@ -1426,7 +1428,7 @@ def add_holdings_cny_settlement_footer_script(html_text: str) -> str:
           }}
 
           function blankStats(summaryKind) {{
-            return {{ summaryKind, count: 0, money: {{}}, capital: 0, capitalDays: 0 }};
+            return {{ summaryKind, count: 0, money: {{}}, capital: 0, capitalDays: 0, positionWeight: 0 }};
           }}
 
           function addMoney(stats, label, value, rate) {{
@@ -1439,6 +1441,7 @@ def add_holdings_cny_settlement_footer_script(html_text: str) -> str:
             const labels = headers.map((header) => (header.textContent || '').trim());
             const currencyIndex = labels.indexOf('币种');
             if (currencyIndex < 0) return {{ labels, byCurrency: new Map(), cny: blankStats(table.dataset.summaryKind || '') }};
+            const positionWeightIndex = labels.indexOf('个股仓位');
 
             const byCurrency = new Map();
             const cny = blankStats(table.dataset.summaryKind || '');
@@ -1470,6 +1473,13 @@ def add_holdings_cny_settlement_footer_script(html_text: str) -> str:
               if (Number.isFinite(capitalDays)) {{
                 stats.capitalDays += capitalDays;
                 cny.capitalDays += capitalDays * rate;
+              }}
+              if (table.dataset.summaryKind === 'holdings' && positionWeightIndex >= 0) {{
+                const positionWeight = Number.parseFloat(cells[positionWeightIndex].dataset.sortValue ?? 'NaN');
+                if (Number.isFinite(positionWeight)) {{
+                  stats.positionWeight += positionWeight;
+                  cny.positionWeight += positionWeight;
+                }}
               }}
             }});
             return {{ labels, byCurrency, cny }};
@@ -1507,8 +1517,8 @@ def add_holdings_cny_settlement_footer_script(html_text: str) -> str:
                 text = formatPercent(numeric);
                 cell.className = classForValue(label, numeric, cell.className);
               }} else if (label === '个股仓位' && stats.summaryKind === 'holdings') {{
-                numeric = 1;
-                text = '100.00%';
+                numeric = stats.positionWeight || null;
+                text = Number.isFinite(numeric) ? formatPercent(numeric) : '-';
               }} else if ((label === '总收益率' || label === '综合年化') && (stats.summaryKind === 'stock' || stats.summaryKind === 'annual')) {{
                 const pnl = stats.money['总盈亏'];
                 numeric = label === '总收益率'

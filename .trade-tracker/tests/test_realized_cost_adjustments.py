@@ -23,7 +23,13 @@ from trade_tracker.market_data import (
     tencent_quote_from_payload,
     yahoo_quote_from_result,
 )
-from trade_tracker.html_tables import add_balanced_summary_table_script, insert_holding_metric_columns, normalize_legacy_holdings_table, normalize_legacy_open_option_sections
+from trade_tracker.html_tables import (
+    add_balanced_summary_table_script,
+    add_holdings_cny_settlement_footer_script,
+    insert_holding_metric_columns,
+    normalize_legacy_holdings_table,
+    normalize_legacy_open_option_sections,
+)
 from trade_tracker.dividends import DIVIDEND_SHEET_NAME, load_dividend_events, load_workbook_dividend_events
 from trade_tracker.options import build_stock_realized_income_maps, open_option_mark_for_row, patch_dashboard_data_with_options
 from trade_tracker import state
@@ -594,6 +600,37 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
 
         self.assertIn(">280<", updated)
         self.assertNotIn(">28</td>", updated)
+
+    def test_holding_position_weight_uses_cny_converted_exposure(self):
+        previous_rates = market_data_module._FX_RATES_TO_CNY
+        previous_future = market_data_module._FX_RATES_FUTURE
+        market_data_module._FX_RATES_TO_CNY = {"人民币": 1.0, "港币": 0.5, "美元": 7.2}
+        market_data_module._FX_RATES_FUTURE = None
+        html = """
+        <table class="summary-table">
+        <thead><tr><th>代码</th><th>名称</th><th>最新市值</th><th>浮动盈亏</th><th>盈亏率</th><th>持股数</th><th>现价</th><th>持仓成本</th><th>当日盈亏</th><th>持仓均价</th><th>回本空间</th><th>方向</th><th>币种</th><th>最近买入</th></tr></thead>
+        <tbody>
+        <tr><td>CNY_DEMO</td><td>人民币示例</td><td>人民币 100.00</td><td>人民币 0.00</td><td>0.00%</td><td>10</td><td>10</td><td>人民币 100.00</td><td>人民币 0.00</td><td>10</td><td>-</td><td>多头</td><td>人民币</td><td>2026-01-01</td></tr>
+        <tr><td>HKD_DEMO</td><td>港币示例</td><td>港币 200.00</td><td>港币 0.00</td><td>0.00%</td><td>20</td><td>10</td><td>港币 200.00</td><td>港币 0.00</td><td>10</td><td>-</td><td>多头</td><td>港币</td><td>2026-01-01</td></tr>
+        </tbody>
+        </table>
+        """
+        try:
+            updated = insert_holding_metric_columns(FakeCore(), html)
+        finally:
+            market_data_module._FX_RATES_TO_CNY = previous_rates
+            market_data_module._FX_RATES_FUTURE = previous_future
+
+        self.assertEqual(updated.count(">50.00%</td>"), 2)
+        self.assertIn('data-sort-value="0.5"', updated)
+
+    def test_holdings_cny_footer_uses_summed_position_weights(self):
+        patched = add_holdings_cny_settlement_footer_script("<html><body><table></table></body></html>")
+
+        self.assertIn("positionWeight: 0", patched)
+        self.assertIn("stats.positionWeight += positionWeight", patched)
+        self.assertIn("cny.positionWeight += positionWeight", patched)
+        self.assertNotIn("Math.abs(marketValue) / Math.abs(base)", patched)
 
     def test_legacy_public_open_option_table_is_normalized_to_full_columns(self):
         html = """
