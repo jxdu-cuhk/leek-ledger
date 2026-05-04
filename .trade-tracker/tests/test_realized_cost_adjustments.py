@@ -580,11 +580,11 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
 
     def test_existing_holding_days_column_uses_current_position_start(self):
         previous = dict(state.HOLDING_DAYS_MAP)
-        state.HOLDING_DAYS_MAP = {("DEMO", "CNY"): "113"}
+        state.HOLDING_DAYS_MAP = {("DEMO", "CNY"): "280"}
         html = """
         <table class="summary-table">
         <thead><tr><th>代码</th><th>名称</th><th>最新市值</th><th>浮动盈亏</th><th>盈亏率</th><th>持股数</th><th>现价</th><th>持仓成本</th><th>当日盈亏</th><th>个股仓位</th><th>持股天数</th><th>持仓均价</th><th>回本空间</th><th>方向</th><th>币种</th><th>最近买入</th></tr></thead>
-        <tbody><tr><td>DEMO</td><td>示例标的</td><td>人民币 930,653.42</td><td>人民币 -42,283.12</td><td>-4.35%</td><td>22291.1</td><td>41.75</td><td>人民币 972,936.54</td><td>人民币 58,848.50</td><td>34.21%</td><td>4</td><td>43.647</td><td>+4.54%</td><td>多头</td><td>人民币</td><td>2026/04/27</td></tr></tbody>
+        <tbody><tr><td>DEMO</td><td>示例标的</td><td>人民币 -172,349.00</td><td>人民币 -78,349.00</td><td>-83.35%</td><td>-4700</td><td>36.67</td><td>人民币 94,000.00</td><td>人民币 -4,982.00</td><td>6.19%</td><td>28</td><td>20</td><td>-45.46%</td><td>空头</td><td>人民币</td><td>2025/07/28</td></tr></tbody>
         </table>
         """
         try:
@@ -592,8 +592,8 @@ class RealizedCostAdjustmentTests(unittest.TestCase):
         finally:
             state.HOLDING_DAYS_MAP = previous
 
-        self.assertIn(">113<", updated)
-        self.assertNotIn(">4</td>", updated)
+        self.assertIn(">280<", updated)
+        self.assertNotIn(">28</td>", updated)
 
     def test_legacy_public_open_option_table_is_normalized_to_full_columns(self):
         html = """

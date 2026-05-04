@@ -459,6 +459,8 @@ def format_compact_number(value: float | None, max_decimals: int = 3) -> str:
         return "-"
     if abs(value) < 0.5 * (10 ** -max_decimals):
         value = 0.0
+    if max_decimals <= 0:
+        return f"{value:,.0f}"
     return f"{value:,.{max_decimals}f}".rstrip("0").rstrip(".")
 
 
