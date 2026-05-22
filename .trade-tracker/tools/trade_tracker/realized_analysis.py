@@ -252,11 +252,6 @@ def render_realized_toolbar() -> str:
               <span class="filter-label">标签</span>
               <select class="filter-select js-realized-tag" aria-label="选择交易标签"></select>
               <span class="filter-label">显示</span>
-              <div class="realized-mode-tabs" data-realized-calendar-mode aria-label="选择日历显示口径">
-                <button type="button" class="realized-mode-tab is-active" data-calendar-mode="realized">已实现</button>
-                <button type="button" class="realized-mode-tab" data-calendar-mode="float">浮盈</button>
-                <button type="button" class="realized-mode-tab" data-calendar-mode="total">合计</button>
-              </div>
             </div>
 """
 
@@ -279,10 +274,10 @@ def render_calendar_panel() -> str:
         '<div class="realized-panel realized-calendar-panel">\n'
         '<h3 class="realized-subtitle">每日盈亏</h3>\n'
         f"{render_realized_toolbar()}\n"
-        '<div class="pnl-calendar" data-pnl-calendar aria-label="每日已实现盈亏日历"></div>\n'
+        '<div class="pnl-calendar" data-pnl-calendar aria-label="每日盈亏日历"></div>\n'
         '<h3 class="realized-subtitle" data-realized-day-title>当日明细</h3>\n'
         '<div class="realized-day-metrics" data-realized-day-metrics></div>\n'
-        + render_empty_table(day_headers, "data-realized-day-body", "选择日期后显示当日已实现盈亏。")
+        + render_empty_table(day_headers, "data-realized-day-body", "选择日期后显示当日平仓记录。")
         + "\n</div>"
     )
 
@@ -396,7 +391,6 @@ def render_realized_filter_script() -> str:
           const monthSelect = section.querySelector('.js-realized-month');
           const currencySelect = section.querySelector('.js-realized-currency');
           const tagSelect = section.querySelector('.js-realized-tag');
-          const calendarModeControl = section.querySelector('[data-realized-calendar-mode]');
           const calendar = section.querySelector('[data-pnl-calendar]');
           const dayTitle = section.querySelector('[data-realized-day-title]');
           const dayMetrics = section.querySelector('[data-realized-day-metrics]');
@@ -410,8 +404,6 @@ def render_realized_filter_script() -> str:
           if (!monthSelect || !currencySelect || !tagSelect || !calendar || !dayBody || !stageStart || !stageEnd) return;
 
           let selectedDate = '';
-          let calendarMode = 'realized';
-
           function unique(values) {
             return Array.from(new Set(values.filter(Boolean)));
           }
@@ -579,11 +571,20 @@ def render_realized_filter_script() -> str:
               const previousFloat = previous ? optionalNumber(previous.float_value) : floatValue;
               const realizedValue = optionalNumber(point.realized_value);
               const previousRealized = previous ? optionalNumber(previous.realized_value) : realizedValue;
+              const explicitDailyFloat = optionalNumber(point.daily_float_value);
+              const explicitDailyTotal = optionalNumber(point.daily_total_value);
+              const realizedDelta = Number.isFinite(realizedValue) && Number.isFinite(previousRealized) ? realizedValue - previousRealized : NaN;
+              const floatDelta = Number.isFinite(explicitDailyFloat)
+                ? explicitDailyFloat
+                : (Number.isFinite(floatValue) && Number.isFinite(previousFloat) ? floatValue - previousFloat : NaN);
               changes.set(String(point.iso), {
                 iso: String(point.iso),
-                totalDelta: Number.isFinite(value) && Number.isFinite(previousValue) ? value - previousValue : NaN,
-                floatDelta: Number.isFinite(floatValue) && Number.isFinite(previousFloat) ? floatValue - previousFloat : NaN,
-                realizedDelta: Number.isFinite(realizedValue) && Number.isFinite(previousRealized) ? realizedValue - previousRealized : NaN,
+                totalDelta: Number.isFinite(explicitDailyTotal)
+                  ? explicitDailyTotal
+                  : (Number.isFinite(value) && Number.isFinite(previousValue) ? value - previousValue : NaN),
+                floatDelta,
+                realizedDelta,
+                hasExplicitDailyFloat: Number.isFinite(explicitDailyFloat),
               });
             });
             curveChangeCacheScope = scope;
@@ -674,35 +675,24 @@ def render_realized_filter_script() -> str:
           }
 
           function dailyFloatSourceForDay(iso) {
-            return Number.isFinite(currentHoldingFloatForDay(iso)) ? '按当前持仓汇总' : '按历史行情';
+            if (Number.isFinite(currentHoldingFloatForDay(iso))) return '按当前持仓汇总';
+            const change = curveChangeForDay(iso);
+            return change?.hasExplicitDailyFloat ? '按每日持仓汇总' : '按历史行情';
           }
 
           function dailyTotalCnyForDay(iso, change) {
+            const totalDelta = optionalNumber(change?.totalDelta);
+            if (Number.isFinite(totalDelta)) return totalDelta;
             const holdingFloat = currentHoldingFloatForDay(iso);
             const realized = realizedConvertedForDay(iso);
             if (Number.isFinite(holdingFloat)) return realized + holdingFloat;
-            const totalDelta = optionalNumber(change?.totalDelta);
-            if (Number.isFinite(totalDelta)) return totalDelta;
             const floatDelta = dailyFloatCnyForDay(iso, change);
             return realized + (Number.isFinite(floatDelta) ? floatDelta : 0);
           }
 
-          function selectedCalendarMode() {
-            return ['realized', 'float', 'total'].includes(calendarMode) ? calendarMode : 'realized';
-          }
-
           function calendarMetricForDay(iso, stats, change) {
-            const mode = selectedCalendarMode();
-            if (mode === 'float') {
-              const value = dailyFloatCnyForDay(iso, change);
-              return { label: '浮盈', value, hasActivity: Number.isFinite(value) && Math.abs(value) > 0.000001 };
-            }
-            if (mode === 'total') {
-              const value = dailyTotalCnyForDay(iso, change);
-              return { label: '合计', value, hasActivity: Number.isFinite(value) && Math.abs(value) > 0.000001 };
-            }
-            const value = realizedConvertedForDay(iso);
-            return { label: '已实现', value, hasActivity: stats.length > 0 || Math.abs(value) > 0.000001 };
+            const value = dailyTotalCnyForDay(iso, change);
+            return { label: '当日盈亏', value, hasActivity: Number.isFinite(value) && Math.abs(value) > 0.000001 };
           }
 
           function dayToneClassForValue(value, stats) {
@@ -901,28 +891,17 @@ def render_realized_filter_script() -> str:
                 empty.textContent = '-';
                 lines.appendChild(empty);
               } else {
-                if (selectedCalendarMode() === 'realized') {
-                  stats.forEach((item) => {
-                    const line = document.createElement('span');
-                    line.className = `pnl-day-line ${tone(item.pnl)}`;
-                    line.textContent = `${item.currency} ${formatNumber(item.pnl)}`;
-                    lines.appendChild(line);
-                  });
-                } else {
-                  const line = document.createElement('span');
-                  line.className = `pnl-day-line ${tone(optionalNumber(metric.value))}`;
-                  line.textContent = `${metric.label} ${formatConvertedMoney(metric.value)}`;
-                  lines.appendChild(line);
-                }
+                const line = document.createElement('span');
+                line.className = `pnl-day-line ${tone(optionalNumber(metric.value))}`;
+                line.textContent = `${metric.label} ${formatConvertedMoney(metric.value)}`;
+                lines.appendChild(line);
               }
               button.appendChild(lines);
 
               const count = document.createElement('span');
               count.className = 'pnl-day-count';
               const tradeCount = stats.reduce((total, item) => total + item.count, 0);
-              count.textContent = selectedCalendarMode() === 'realized'
-                ? (tradeCount ? `${tradeCount} 笔` : '')
-                : (hasActivity ? '波动' : '');
+              count.textContent = tradeCount ? `${tradeCount} 笔` : (hasActivity ? '盈亏' : '');
               button.appendChild(count);
 
               button.addEventListener('click', () => {
@@ -989,13 +968,9 @@ def render_realized_filter_script() -> str:
           function renderDayMetrics() {
             if (!dayMetrics) return;
             const change = curveChangeForDay(selectedDate);
-            const realizedConverted = realizedConvertedForDay(selectedDate);
-            const floatDelta = dailyFloatCnyForDay(selectedDate, change);
             const totalValue = dailyTotalCnyForDay(selectedDate, change);
             const metrics = [
-              { label: `已实现折${reportingCurrency()}`, value: realizedConverted, note: '按平仓记录' },
-              { label: `当日浮盈变动折${reportingCurrency()}`, value: Number.isFinite(floatDelta) ? floatDelta : 0, note: dailyFloatSourceForDay(selectedDate) },
-              { label: `当日总变动折${reportingCurrency()}`, value: totalValue, note: '已实现加持仓浮动' },
+              { label: `当日盈亏折${reportingCurrency()}`, value: totalValue, note: '已实现和平仓后持仓波动合计' },
             ];
             dayMetrics.innerHTML = metrics.map((item) => `
               <div class="realized-day-metric">
@@ -1149,19 +1124,6 @@ def render_realized_filter_script() -> str:
             selectedDate = '';
             renderAll();
           });
-          if (calendarModeControl) {
-            calendarModeControl.addEventListener('click', (event) => {
-              if (!(event.target instanceof Element)) return;
-              const button = event.target.closest('[data-calendar-mode]');
-              if (!button) return;
-              calendarMode = button.dataset.calendarMode || 'realized';
-              calendarModeControl.querySelectorAll('[data-calendar-mode]').forEach((item) => {
-                item.classList.toggle('is-active', item === button);
-              });
-              selectedDate = '';
-              renderAll();
-            });
-          }
           window.addEventListener('trade-tracker-reporting-currency-change', renderAll);
           stageStart.addEventListener('change', renderStage);
           stageEnd.addEventListener('change', renderStage);
@@ -1185,7 +1147,7 @@ def render_realized_analysis_section(core, rows: list[tuple[int, dict[int, objec
             <div class="section-head">
               <div>
                 <h2 class="section-title">盈亏日历 / 阶段账单</h2>
-                <p class="section-note">日历可在已实现、持仓浮盈和合计之间切换；已实现按平仓记录，最新交易日浮盈优先与当前持仓汇总保持一致，历史日期沿用历史行情曲线。</p>
+                <p class="section-note">日历统一显示当日盈亏，和总收益曲线的 daily_total_value 同源；下方明细保留平仓记录和交易标签筛选。</p>
               </div>
               <span class="section-toggle" aria-hidden="true"></span>
             </div>

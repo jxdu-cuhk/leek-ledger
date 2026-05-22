@@ -220,7 +220,8 @@ def render_performance_report_section() -> str:
                 const previous = index > 0 ? rawPoints[index - 1] : null;
                 const amount = number(point.value) || 0;
                 const previousAmount = previous ? number(previous.value) || 0 : amount;
-                const delta = index > 0 ? amount - previousAmount : 0;
+                const explicitDailyTotal = optionalNumber(point.daily_total_value);
+                const delta = Number.isFinite(explicitDailyTotal) ? explicitDailyTotal : (index > 0 ? amount - previousAmount : 0);
                 const capital = capitalFor(point);
                 const previousCapital = previous ? capitalFor(previous) : capital;
                 const dailyReturn = previousCapital > 0 ? (delta / previousCapital) * 100 : 0;

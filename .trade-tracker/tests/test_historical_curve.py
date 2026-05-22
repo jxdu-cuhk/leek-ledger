@@ -52,6 +52,11 @@ class FakeCore:
         return {"pnl": 29.0, "capital": 1001.0, "days": 4}
 
 
+class RawOrderCore(FakeCore):
+    def compute_row_metrics(self, _cells):
+        return {}
+
+
 class ImportedAggregateCore(FakeCore):
     def compute_row_metrics(self, _cells):
         return {"pnl": -109637.67, "capital": 1001.0, "days": 4}
@@ -124,13 +129,165 @@ class HistoricalCurveTests(unittest.TestCase):
         self.assertEqual(series["source"], "history")
         self.assertEqual(series["currency"], "人民币")
         values_by_iso = {point["iso"]: point["value"] for point in series["points"]}
-        self.assertAlmostEqual(values_by_iso["2026-05-01"], 0.0)
+        self.assertAlmostEqual(values_by_iso["2026-05-01"], -1.0)
         self.assertAlmostEqual(values_by_iso["2026-05-02"], 19.0)
         self.assertAlmostEqual(values_by_iso["2026-05-05"], 29.0)
         points_by_iso = {point["iso"]: point for point in series["points"]}
         self.assertAlmostEqual(points_by_iso["2026-05-01"]["market_value"], 1000.0)
+        self.assertAlmostEqual(points_by_iso["2026-05-01"]["daily_buy_amount"], 1001.0)
+        self.assertAlmostEqual(points_by_iso["2026-05-01"]["return_basis"], 1001.0)
+        self.assertAlmostEqual(points_by_iso["2026-05-02"]["daily_float_value"], 20.0)
         self.assertAlmostEqual(points_by_iso["2026-05-01"]["net_flow"], 1001.0)
         self.assertAlmostEqual(points_by_iso["2026-05-05"]["net_flow"], -1030.0)
+
+    def test_curve_uses_order_prices_on_trade_days_and_closes_between(self):
+        row = stock_row()
+        for column, value in {4: date(2026, 5, 3), 10: 120, 11: 0, 12: 1000}.items():
+            row[column] = Cell(value)
+        rows = [(2, row)]
+        history = [
+            SecurityHistoryPoint("2026-05-01", 110.0),
+            SecurityHistoryPoint("2026-05-02", 105.0),
+            SecurityHistoryPoint("2026-05-03", 90.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "security_history.json"
+            with (
+                patch.object(historical_curve_module, "HISTORY_CACHE_PATH", cache_path),
+                patch("trade_tracker.historical_curve.fetch_security_history_points_online", return_value=history),
+            ):
+                data = replace_curve_series_with_historical_prices(RawOrderCore(), rows, {"curve_series": []})
+
+        points = {point["iso"]: point for point in data["curve_series"][0]["points"]}
+        self.assertAlmostEqual(points["2026-05-01"]["value"], 0.0)
+        self.assertAlmostEqual(points["2026-05-02"]["value"], 50.0)
+        self.assertAlmostEqual(points["2026-05-03"]["value"], 200.0)
+        self.assertAlmostEqual(points["2026-05-03"]["daily_total_value"], 150.0)
+        self.assertAlmostEqual(points["2026-05-03"]["realized_value"], 200.0)
+        self.assertAlmostEqual(points["2026-05-01"]["holding_market_value"], 1000.0)
+        self.assertAlmostEqual(points["2026-05-02"]["holding_market_value"], 1050.0)
+        self.assertAlmostEqual(points["2026-05-03"]["holding_market_value"], 0.0)
+        self.assertAlmostEqual(points["2026-05-03"]["cumulative_sell_amount"] - points["2026-05-03"]["cumulative_buy_amount"], 200.0)
+
+    def test_curve_net_buy_after_sell_counts_only_extra_cash_as_inflow(self):
+        sell_row = stock_row()
+        for column, value in {2: date(2026, 5, 1), 4: date(2026, 5, 2), 8: 4, 9: 100, 10: 100, 11: 0, 12: 400}.items():
+            sell_row[column] = Cell(value)
+        buy_row = stock_row()
+        for column, value in {2: date(2026, 5, 2), 4: date(2026, 5, 3), 8: 5, 9: 100, 10: 100, 11: 0, 12: 500}.items():
+            buy_row[column] = Cell(value)
+        rows = [(2, sell_row), (3, buy_row)]
+        history = [
+            SecurityHistoryPoint("2026-05-01", 100.0),
+            SecurityHistoryPoint("2026-05-02", 100.0),
+            SecurityHistoryPoint("2026-05-03", 100.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "security_history.json"
+            with (
+                patch.object(historical_curve_module, "HISTORY_CACHE_PATH", cache_path),
+                patch("trade_tracker.historical_curve.fetch_security_history_points_online", return_value=history),
+            ):
+                data = replace_curve_series_with_historical_prices(RawOrderCore(), rows, {"curve_series": []})
+
+        points = {point["iso"]: point for point in data["curve_series"][0]["points"]}
+        self.assertAlmostEqual(points["2026-05-01"]["holding_market_value"], 400.0)
+        self.assertAlmostEqual(points["2026-05-02"]["daily_buy_amount"], 500.0)
+        self.assertAlmostEqual(points["2026-05-02"]["daily_sell_amount"], 400.0)
+        self.assertAlmostEqual(points["2026-05-02"]["net_flow"], 100.0)
+        self.assertAlmostEqual(points["2026-05-02"]["holding_market_value"], 500.0)
+        self.assertAlmostEqual(points["2026-05-02"]["return_basis"], 900.0)
+        self.assertAlmostEqual(
+            points["2026-05-02"]["daily_total_value"],
+            points["2026-05-02"]["holding_market_value"] - points["2026-05-01"]["holding_market_value"] - points["2026-05-02"]["daily_buy_amount"] + points["2026-05-02"]["daily_sell_amount"],
+        )
+
+    def test_curve_net_sell_after_buy_counts_extra_cash_as_outflow(self):
+        sell_row = stock_row()
+        for column, value in {2: date(2026, 5, 1), 4: date(2026, 5, 2), 8: 5, 9: 100, 10: 100, 11: 0, 12: 500}.items():
+            sell_row[column] = Cell(value)
+        buy_row = stock_row()
+        for column, value in {2: date(2026, 5, 2), 4: date(2026, 5, 3), 8: 4, 9: 100, 10: 100, 11: 0, 12: 400}.items():
+            buy_row[column] = Cell(value)
+        rows = [(2, sell_row), (3, buy_row)]
+        history = [
+            SecurityHistoryPoint("2026-05-01", 100.0),
+            SecurityHistoryPoint("2026-05-02", 100.0),
+            SecurityHistoryPoint("2026-05-03", 100.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "security_history.json"
+            with (
+                patch.object(historical_curve_module, "HISTORY_CACHE_PATH", cache_path),
+                patch("trade_tracker.historical_curve.fetch_security_history_points_online", return_value=history),
+            ):
+                data = replace_curve_series_with_historical_prices(RawOrderCore(), rows, {"curve_series": []})
+
+        points = {point["iso"]: point for point in data["curve_series"][0]["points"]}
+        self.assertAlmostEqual(points["2026-05-01"]["holding_market_value"], 500.0)
+        self.assertAlmostEqual(points["2026-05-02"]["daily_buy_amount"], 400.0)
+        self.assertAlmostEqual(points["2026-05-02"]["daily_sell_amount"], 500.0)
+        self.assertAlmostEqual(points["2026-05-02"]["net_flow"], -100.0)
+        self.assertAlmostEqual(points["2026-05-02"]["holding_market_value"], 400.0)
+        self.assertAlmostEqual(points["2026-05-02"]["return_basis"], 900.0)
+        self.assertAlmostEqual(
+            points["2026-05-02"]["daily_total_value"],
+            points["2026-05-02"]["holding_market_value"] - points["2026-05-01"]["holding_market_value"] - points["2026-05-02"]["daily_buy_amount"] + points["2026-05-02"]["daily_sell_amount"],
+        )
+
+    def test_recent_history_cache_is_refreshed_even_when_checked_today(self):
+        row = stock_row()
+        row[2] = Cell(date(2026, 5, 18))
+        row[4] = Cell(None)
+        row[5] = Cell("688312")
+        row[8] = Cell(10)
+        row[9] = Cell(90)
+        row[10] = Cell(None)
+        row[12] = Cell(900)
+        rows = [(2, row)]
+        stale_points = [
+            {"iso": "2026-05-18", "close": 90.0},
+            {"iso": "2026-05-20", "close": 93.0},
+            {"iso": "2026-05-21", "close": 98.0},
+        ]
+        refreshed_history = [
+            SecurityHistoryPoint("2026-05-18", 90.0),
+            SecurityHistoryPoint("2026-05-20", 100.0),
+            SecurityHistoryPoint("2026-05-21", 80.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "security_history.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "securities": {
+                            "CNY|688312": {
+                                "ticker": "688312",
+                                "currency": "CNY",
+                                "fetched_at": date.today().isoformat(),
+                                "points": stale_points,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with (
+                patch.object(historical_curve_module, "HISTORY_CACHE_PATH", cache_path),
+                patch("trade_tracker.historical_curve.fetch_security_history_points_online", return_value=refreshed_history) as fetch_online,
+            ):
+                data = replace_curve_series_with_historical_prices(FakeCore(), rows, {"curve_series": []})
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+
+        fetch_online.assert_called()
+        points_by_iso = {point["iso"]: point for point in data["curve_series"][0]["points"]}
+        self.assertAlmostEqual(points_by_iso["2026-05-21"]["daily_float_value"], -200.0)
+        cached_21 = next(
+            point["close"] for point in cache["securities"]["CNY|688312"]["points"] if point["iso"] == "2026-05-21"
+        )
+        self.assertEqual(cached_21, 80.0)
+        self.assertEqual(cache["securities"]["CNY|688312"]["recent_refresh_version"], 2)
 
     def test_performance_stock_payload_includes_open_holding_float(self):
         row = stock_row()
@@ -176,6 +333,56 @@ class HistoricalCurveTests(unittest.TestCase):
         self.assertEqual(item["closedCount"], 0)
         self.assertAlmostEqual(item["capital"], 1001.0)
         self.assertAlmostEqual(item["rate"], item["pnl"] / item["capital"] * 100)
+
+    def test_curve_daily_float_tracks_day_to_day_position_movement(self):
+        row = stock_row()
+        row[4] = Cell(None)
+        row[10] = Cell(None)
+        rows = [(2, row)]
+        history = [
+            SecurityHistoryPoint("2026-05-01", 100.0),
+            SecurityHistoryPoint("2026-05-02", 110.0),
+            SecurityHistoryPoint("2026-05-05", 112.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "security_history.json"
+            with (
+                patch.object(historical_curve_module, "HISTORY_CACHE_PATH", cache_path),
+                patch("trade_tracker.historical_curve.fetch_security_history_points_online", return_value=history),
+            ):
+                data = replace_curve_series_with_historical_prices(FakeCore(), rows, {"curve_series": []})
+
+        points_by_iso = {point["iso"]: point for point in data["curve_series"][0]["points"]}
+        self.assertAlmostEqual(points_by_iso["2026-05-01"]["daily_float_value"], 0.0)
+        self.assertAlmostEqual(points_by_iso["2026-05-02"]["daily_float_value"], 100.0)
+        self.assertAlmostEqual(points_by_iso["2026-05-05"]["daily_float_value"], 20.0)
+
+    def test_curve_total_uses_pure_cumulative_pnl_without_holding_cost_adjustment(self):
+        closed_row = stock_row()
+        open_row = stock_row()
+        open_row[4] = Cell(None)
+        open_row[10] = Cell(None)
+        rows = [(2, closed_row), (3, open_row)]
+        history = [
+            SecurityHistoryPoint("2026-05-01", 100.0),
+            SecurityHistoryPoint("2026-05-05", 101.0),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "security_history.json"
+            with (
+                patch.object(historical_curve_module, "HISTORY_CACHE_PATH", cache_path),
+                patch("trade_tracker.historical_curve.fetch_security_history_points_online", return_value=history),
+            ):
+                data = replace_curve_series_with_historical_prices(FakeCore(), rows, {"curve_series": []})
+
+        latest = {point["iso"]: point for point in data["curve_series"][0]["points"]}["2026-05-05"]
+        self.assertAlmostEqual(latest["realized_value"], 29.0)
+        self.assertAlmostEqual(latest["pure_float_value"], 9.0)
+        self.assertNotIn("cost_adjustment_value", latest)
+        self.assertAlmostEqual(latest["float_value"], 9.0)
+        self.assertAlmostEqual(latest["pure_total_value"], 38.0)
+        self.assertAlmostEqual(latest["value"], 38.0)
+        self.assertAlmostEqual(latest["daily_total_value"], 40.0)
 
     def test_performance_stock_rate_matches_app_adjusted_cost_basis_for_open_holding(self):
         snapshots = {
@@ -337,7 +544,7 @@ class HistoricalCurveTests(unittest.TestCase):
                 data = replace_curve_series_with_historical_prices(FakeCore(), rows, {"curve_series": []})
 
         values_by_iso = {point["iso"]: point["value"] for point in data["curve_series"][0]["points"]}
-        self.assertAlmostEqual(values_by_iso["2026-05-01"], 0.0)
+        self.assertAlmostEqual(values_by_iso["2026-05-01"], -1.0)
         self.assertAlmostEqual(values_by_iso["2026-05-02"], 209.0)
 
     def test_adjusted_history_prices_do_not_create_false_monthly_profit(self):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -57,8 +58,8 @@ class DashboardLayoutTests(unittest.TestCase):
         updated = reorder_dashboard_sections(html)
         titles = [
             "当前持仓",
-            "资金口径 / 数据质量",
             "未平仓期权",
+            "资金口径 / 数据质量",
             "总收益曲线",
             "总体概览",
             "收益报告",
@@ -95,7 +96,7 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertIn('"key":"returns"', updated)
         self.assertIn('"key":"review"', updated)
         self.assertIn('"key":"details"', updated)
-        self.assertIn('"titles":["当前持仓","资金口径 / 数据质量","未平仓期权"]', updated)
+        self.assertIn('"titles":["当前持仓","未平仓期权","资金口径 / 数据质量"]', updated)
         self.assertIn('"titles":["总收益曲线","总体概览","收益报告"]', updated)
         self.assertIn("dashboard-section-primary", updated)
         self.assertIn("dashboard-section-supporting", updated)
@@ -178,6 +179,63 @@ class DashboardLayoutTests(unittest.TestCase):
         self.assertLess(updated.index("ths-curve-hero"), updated.index("curve-grid"))
         self.assertLess(updated.index("curve-grid"), updated.index("ths-curve-control-panel"))
         self.assertEqual(updated, updated_again)
+
+    def test_apply_tonghuashun_curve_style_uses_curve_trade_flow_return_for_initial_hero(self):
+        payload = [
+            {
+                "scope": "all",
+                "scopeLabel": "汇总",
+                "capital": 100,
+                "points": [
+                    {
+                        "date": "2026/05/01",
+                        "iso": "2026-05-01",
+                        "serial": 46143,
+                        "value": 0,
+                        "total_value": 0,
+                        "daily_total_value": 0,
+                        "principal": 100,
+                    },
+                    {
+                        "date": "2026/05/02",
+                        "iso": "2026-05-02",
+                        "serial": 46144,
+                        "value": 10,
+                        "total_value": 10,
+                        "daily_total_value": 10,
+                        "principal": 100,
+                    },
+                    {
+                        "date": "2026/05/03",
+                        "iso": "2026-05-03",
+                        "serial": 46145,
+                        "value": 15,
+                        "total_value": 15,
+                        "daily_total_value": 5,
+                        "principal": 100,
+                    },
+                ],
+            }
+        ]
+        html = (
+            '<div class="currency-overview-card currency-overview-cny-card">'
+            '<span>总盈亏</span><strong class="value-positive">99.00</strong>'
+            '<span>总收益率</span><strong class="value-positive">99.00%</strong>'
+            "</div>"
+            + section(
+                "总收益曲线",
+                '<div class="curve-grid" data-ths-curve-grid><div class="curve-card"><svg class="curve-svg"></svg></div></div>'
+                f'<script type="application/json" data-return-curve-json>{json.dumps(payload)}</script>',
+            )
+        )
+
+        updated = apply_tonghuashun_curve_style(html)
+        hero = updated[updated.index("ths-curve-hero") : updated.index("curve-grid")]
+
+        self.assertIn(">+15.00</div>", hero)
+        self.assertIn(">+15.00%</strong>", hero)
+        self.assertNotIn(">99.00</div>", hero)
+        self.assertNotIn(">99.00%</strong>", hero)
 
     def test_collapse_secondary_sections_only_keeps_current_and_options_open(self):
         html = (

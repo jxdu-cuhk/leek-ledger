@@ -167,8 +167,9 @@ def insert_capital_quality_section(html_text: str) -> str:
     sections = list(DETAILS_PATTERN.finditer(html_text))
     if not sections:
         return html_text
-    for match in sections:
-        if section_title(match.group(0)) == "当前持仓":
-            return html_text[: match.end()] + "\n" + section_html + html_text[match.end() :]
+    for target_title in ("未平仓期权", "当前持仓"):
+        for match in sections:
+            if section_title(match.group(0)) == target_title:
+                return html_text[: match.end()] + "\n" + section_html + html_text[match.end() :]
     first = sections[0]
     return html_text[: first.end()] + "\n" + section_html + html_text[first.end() :]

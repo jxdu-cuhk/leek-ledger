@@ -14,6 +14,7 @@ from .dashboard_layout import (
     insert_dashboard_page_tabs,
     reorder_dashboard_sections,
 )
+from .daily_pnl_history import apply_daily_pnl_history_to_curve, record_daily_pnl_snapshot
 from .display_payload import build_display_payload
 from .dividends import load_dividend_events
 from .html_tables import (
@@ -33,6 +34,7 @@ from .html_tables import (
     reorder_table_columns,
 )
 from .historical_curve import replace_curve_series_with_historical_prices
+from .holdings_daily import apply_segmented_daily_pnl
 from .holdings_overview import insert_holdings_account_overview
 from .market_data import (
     fetch_quote_payload,
@@ -145,6 +147,7 @@ def patch_core(core, workbook_path: Path) -> None:
         data = original_build_dashboard_data(rows)
         if isinstance(data, dict):
             data = patch_dashboard_data_with_options(core, rows, data)
+            data = apply_segmented_daily_pnl(core, rows, data)
             data = replace_curve_series_with_historical_prices(core, rows, data)
             capital_by_currency: dict[str, float] = {}
             for item in data.get("stock_summary", []) or []:
@@ -173,6 +176,8 @@ def patch_core(core, workbook_path: Path) -> None:
                     series["capital"] = current_base_by_currency.get(currency) or capital_by_currency.get(currency, 0.0)
             data = attach_dynamic_curve_capital(core, rows, data)
             state.DISPLAY_PAYLOAD = build_display_payload(core, rows, data)
+            daily_pnl_cache = record_daily_pnl_snapshot(state.DISPLAY_PAYLOAD)
+            data = apply_daily_pnl_history_to_curve(data, state.DISPLAY_PAYLOAD, daily_pnl_cache)
             data["display_payload"] = state.DISPLAY_PAYLOAD
             return data
         state.DISPLAY_PAYLOAD = {}

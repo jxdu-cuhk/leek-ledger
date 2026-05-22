@@ -505,7 +505,7 @@ html[data-dashboard-page]:not([data-dashboard-page="all"]) .dashboard-section-su
 }}
 
 .holdings-account-stat {{
-  grid-column: span 2;
+  grid-column: span 3;
 }}
 
 .holdings-account-trend {{
@@ -2884,7 +2884,7 @@ details[data-ths-return-curve] .ths-curve-bars div:nth-child(2) strong {{
   }}
 
   .holdings-account-stat {{
-    grid-column: span 4;
+    grid-column: span 6;
   }}
 
   .holdings-account-trend {{

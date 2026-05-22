@@ -61,7 +61,7 @@
 | `ANNUAL_HOLDING_DAYS_MAP` | 年度切片持有天数 | `analytics.py` | 分年度汇总表 |
 | `OPEN_OPTION_MARKS` | 未平仓期权现价、浮盈、占用本金 | `options.py` | 期权表、卖出认沽仓位 |
 | `PERFORMANCE_STOCK_PAYLOAD` | 月度/年度个股表现切片 | `historical_curve.py` | 收益报告 |
-| `DISPLAY_PAYLOAD` | 持仓、币种折算、当日浮盈、已实现交易与日汇总的统一展示层 | `display_payload.py` / `patcher.py` | 当前持仓顶部卡、盈亏日历 |
+| `DISPLAY_PAYLOAD` | 持仓、账户总盈亏、币种折算、当日浮盈、已实现交易与日汇总的统一展示层 | `display_payload.py` / `patcher.py` | 当前持仓顶部卡、盈亏日历 |
 | `TRANSACTION_TAGS_BY_ROW` / `TRANSACTION_TAGS_PAYLOAD` | 交易行号到标签的映射和标签计数 | `transaction_tags.py` / `patcher.py` | 交易时间线、已实现 payload、标签筛选 |
 
 ## Dashboard Data 接口
@@ -102,7 +102,7 @@
 
 当日盈亏特殊规则：只有展示交易日前没有隔夜底仓、且展示交易日当天才建仓的标的，才按建仓价到现价算；已有隔夜底仓的标的即使当天做 T 或卖出后买回，也继承行情源的昨收涨跌。
 
-核心盈亏不变量：逐行平仓盈亏按 `现股：(平仓价 - 开仓价) × 数量 - 费用`（空头反向）和 `期权：开仓权利金 - 平仓权利金 - 费用`（买入期权反向）计算；标的 `总盈亏 = 已实现现股/期权盈亏 + 分红净额 + 当前未平仓纯浮盈`。当前持仓表的 `all_in_cost` 只回冲本轮持仓起始日之后的部分卖出、已平仓期权和分红；如果标的曾经清仓归零，清仓前的历史收益不进入新一轮持仓 `float_pnl`。
+核心盈亏不变量要分两层看：逐行平仓盈亏按 `现股：(平仓价 - 开仓价) × 数量 - 费用`（空头反向）和 `期权：开仓权利金 - 平仓权利金 - 费用`（买入期权反向）计算；账户总盈亏和总收益曲线使用 `当前持仓市值 + 累计卖出金额 - 累计买入金额`，这与“已实现现股/期权盈亏 + 分红净额 + 当前未平仓纯浮盈”的交易事实口径应保持一致。当前持仓表的行级 `float_pnl` 为了对齐券商 App 持仓收益率，可以使用 `market_value - adjusted cost`，其中 `all_in_cost` 只回冲本轮持仓起始日之后的部分卖出、已平仓期权和分红；如果标的曾经清仓归零，清仓前的历史收益不进入新一轮持仓 `float_pnl`，也不会额外进入账户总盈亏。
 
 ## 统一展示 Payload
 
@@ -116,6 +116,7 @@
 | `holdings` | 当前持仓行的标准化数值，包含原币种和人民币折算 |
 | `holdingsTotals` | 持仓总资产、绝对市值、成本、浮盈、当日盈亏、卖出认沽占用，统一折人民币 |
 | `holdingsByCurrency` | 按原币种拆分的持仓资产、成本、浮盈和当日盈亏 |
+| `accountPnl` | 账户总盈亏，按总收益曲线最新点 `total_value` / `value` 分币种和人民币折算 |
 | `dailyPnl.current` | 最新展示交易日的持仓浮盈变动，供盈亏日历和顶部卡共用 |
 | `realized.trades` | 已实现交易明细的标准化列表，等价于旧 `data-realized-payload` 的来源 |
 | `realized.daily` / `realizedDaily` | 已实现盈亏按平仓日和币种汇总；`realizedDaily` 是兼容别名 |
@@ -126,7 +127,7 @@
 
 已接入：
 
-- 当前持仓顶部卡优先读 `state.DISPLAY_PAYLOAD["holdingsTotals"]`，读不到时才回退解析 HTML 表格。
+- 当前持仓顶部卡优先读 `state.DISPLAY_PAYLOAD["holdingsTotals"]`；`总盈亏` 用当前持仓汇总浮盈，读不到时才回退解析 HTML 表格。
 - 资金口径 / 数据质量区块读 `state.DISPLAY_PAYLOAD["capital"]` 和 `["dataQuality"]`，只负责展示资金分母、期权兜底和行情完整度。
 - 盈亏日历的已实现日汇总、最新展示交易日浮盈优先读 `data-display-payload`，旧明细重算、旧表格和顶部卡只作为兜底；交易标签来自 `realized.trades[].tags`。
 
@@ -136,7 +137,7 @@
 
 | 分页 | 包含区块 | 主视图 |
 | --- | --- | --- |
-| `持仓` | 当前持仓、资金口径 / 数据质量、未平仓期权 | 当前持仓 |
+| `持仓` | 当前持仓、未平仓期权、资金口径 / 数据质量 | 当前持仓 |
 | `收益` | 总收益曲线、总体概览、收益报告 | 总收益曲线 |
 | `复盘` | 盈亏日历 / 阶段账单、清仓分析、期权收益分析 | 盈亏日历 / 阶段账单 |
 | `明细` | 分年度个股汇总、交易时间线、工作表入口 | 分年度个股汇总 |
@@ -149,14 +150,14 @@
 | 页面区块 | 入口模块 | 数据入口 | 输出/显示字段 | 当前口径风险 |
 | --- | --- | --- | --- | --- |
 | 当前持仓表 | `html_tables.py` | `data["holdings"]` | 代码、名称、市值、浮盈、收益率、仓位、天数、回本空间 | 成本只回冲本轮持仓内的已实现收益和分红，和原始买入成本不同；清仓前收益不进入新仓浮盈 |
-| 当前持仓顶部卡 | `holdings_overview.py` | `state.DISPLAY_PAYLOAD`、交易行、历史行情；HTML 表格兜底 | 持仓总资产、总盈亏、总市值、现持仓浮盈、已实现 | 现持仓历史区间仍会临时拉个股历史行情 |
+| 当前持仓顶部卡 | `holdings_overview.py` | `state.DISPLAY_PAYLOAD["holdingsTotals"]`；HTML 表格兜底 | 持仓总资产、当前持仓总盈亏、总市值、当日盈亏 | `总盈亏` 只读当前持仓汇总浮盈 `floatPnlCny`，不再混入账户级已实现收益 |
 | 资金口径 / 数据质量 | `capital_quality.py` | `state.DISPLAY_PAYLOAD["capital"]`、`["dataQuality"]` | 账户资产口径、风险敞口、成本/占用、持仓浮盈、期权资金来源、行情健康 | 只展示已统一的资金口径，不替代后续曲线收益率 payload |
 | 未平仓期权 | `options.py`、`html_tables.py` | 未平仓期权行、公开期权行情 | 现价、浮动盈亏、占用本金 | short put 会推导 cash-secured capital；short call 不自动虚构本金 |
-| 总体概览 | `overview.py` | 原始 metric cards、交易行、汇率 | 总盈亏、收益率、年化、交易费用、分币种概览 | 人民币汇总来自各币种卡片反推和折算，收益率分母可能不直观 |
-| 盈亏日历 / 阶段账单 | `realized_analysis.py` | `data-display-payload`、`data-realized-payload`、`data-return-curve-json` | 已实现、浮盈、合计三种日历口径，已实现明细标签筛选 | 已实现日汇总和最新交易日浮盈读统一 payload；历史浮盈来自曲线点差 |
+| 总体概览 | `overview.py` | 原始 metric cards、交易行、汇率 | 总盈亏、收益率、年化、交易费用、分币种概览 | 不再用当前持仓展示浮盈重算 `总盈亏`；人民币汇总只折算原始/曲线同口径分币种总额 |
+| 盈亏日历 / 阶段账单 | `realized_analysis.py` | `data-display-payload`、`data-realized-payload`、`data-return-curve-json` | 单一当日盈亏日历、已实现明细标签筛选 | 日历和阶段账单统一读曲线 `daily_total_value`；已实现和平仓后持仓波动不再作为互斥模式展示 |
 | 清仓分析 | `clearance_analysis.py` | 股票交易行 | 清仓周期、盈亏、本金、收益率、年化 | 只看现股清仓周期，不包含期权归因 |
 | 期权收益分析 | `option_analysis.py` | `data-option-payload` | 期权总览、标的拆分、明细 | 只统计已平仓/到期的期权，未平仓只在未平仓期权表显示 |
-| 总收益曲线 | `historical_curve.py`、`return_curve.py` | `data["curve_series"]`、指数缓存、汇率 | 汇总/A股/港股/美股曲线、baseline、超额、K线 | 曲线金额、收益率、资金流、资金分母仍需继续向统一 payload 收敛 |
+| 总收益曲线 | `historical_curve.py`、`return_curve.py`、`daily_pnl_history.py`、`dashboard_layout.py` | `data["curve_series"]`、个股/指数缓存、汇率、当日浮盈缓存 | 汇总/A股/港股/美股曲线、baseline、超额、K线 | `value` / `total_value` 是 `当前持仓市值 + 累计卖出金额 - 累计买入金额`；`daily_total_value = 今日持仓市值 - 昨日持仓市值 - 今日买入金额 + 今日卖出金额`，也等于当前点和上一点的累计总盈亏差额；收益率用 `daily_total_value / (昨日持仓市值 + 今日买入金额)` 逐日连乘；指数缓存带版本校验，今天的 A/H baseline 必须用实时尾点覆盖缓存；`daily_float_value` 只作为持仓波动明细 |
 | 收益报告 | `performance_report.py` | `data-return-curve-json`、`data-realized-payload`、`data-performance-stock-payload` | 最大增长/回撤、盈亏对比、日历、个股盈亏 | 个股月/年收益率来自后端 App 口径 payload，报告前端只负责展示和排序 |
 | 分年度个股汇总 | `html_tables.py`、`historical_curve.py` | `annual_summary`、`PERFORMANCE_STOCK_PAYLOAD` | 年度内盈亏、收益率、年化、持有天数 | 已按年切片；`nativeRealizedPnl` 是交易已实现，`nativeDividendPnl` 是分红/扣税，`nativePnl` 是总盈亏；仍持仓标的收益率用 `总盈亏 / abs(期末市值 - 总盈亏)`，对齐券商 App 持仓盈亏率 |
 | 交易时间线 | `transaction_tags.py`、核心生成器 | `TRANSACTION_TAGS_BY_ROW`、核心 HTML 表格 | 逐笔交易、标签列、标签筛选 | 标签按 `交易记录` 行号对齐；不要在没有 `标签` 表头时把其他空白扩展列当标签 |
@@ -184,10 +185,19 @@
 | 字段 | 含义 |
 | --- | --- |
 | `date` / `iso` / `serial` | 显示日期、ISO 日期、Excel serial |
-| `value` | 累计总盈亏，当前等于 realized + unrealized |
-| `float_value` | 累计持仓浮盈 |
+| `value` | 账户累计总盈亏，等于 `realized_value + float_value` |
+| `float_value` | 累计未实现浮盈，不含当前持仓成本回冲 |
+| `pure_float_value` | 兼容字段，当前同 `float_value` |
 | `realized_value` | 累计已实现盈亏 |
-| `total_value` | 累计总盈亏 |
+| `total_value` | 账户累计总盈亏 |
+| `pure_total_value` | 兼容字段，当前同 `total_value` |
+| `daily_float_value` | 当天持仓纯浮盈变动 |
+| `daily_total_value` | 当天总盈亏变动，按 `今日持仓市值 - 昨日持仓市值 - 今日买入金额 + 今日卖出金额` 计算，并应等于 `当前 total_value - 上一交易点 total_value` |
+| `holding_market_value` | 当日未平仓净持仓市值，空头为负，用于闭合总盈亏公式 |
+| `daily_buy_amount` / `daily_sell_amount` | 当天买入金额 / 卖出金额；费用跟随现有成交成本和已实现盈亏口径进入 |
+| `cumulative_buy_amount` / `cumulative_sell_amount` | 累计买入金额 / 累计卖出金额，用于核验 `total_value` |
+| `return_basis` | 当日收益率分母，等于 `昨日持仓绝对市值 + 今日买入金额` |
+| `account_equity` | 兼容旧前端字段，历史曲线中不再作为收益率主分母 |
 | `market_value` | 当日未平仓市值 |
 | `capital` | 当日活跃持仓成本/占用资金 |
 | `principal` | 根据现金流推导的本金基准 |
@@ -195,12 +205,13 @@
 
 前端会按这些点再推导：
 
+- 点位来源：买入日使用订单买入价，卖出日使用订单卖出价确认已实现，中间无交易日使用历史收盘价；实盘最新日有当前价时用当前价覆盖历史缓存。
 - 金额模式：使用 `value` / `total_value` 等累计金额。
-- 收益率模式：使用点上的 `capital` 或携带资本作为分母。
+- 收益率模式：优先使用点上的 `return_basis`，缺少时按 `上一交易点 holding_market_value + 当天 daily_buy_amount` 现场兜底；首屏占位和前端重绘必须同源。
 - 超额收益：个人同口径值减当前 baseline。
 - K 线：对收益点按日/周/月/年聚合，K 线模式不展示 baseline。
 
-曲线核验边界：每个币种最新 `points[-1].value` 应和同币种 `stock_summary.total_pnl` 汇总一致；折人民币后的差异只允许来自实时汇率重取和小数四舍五入。
+曲线核验边界：每个币种最新 `points[-1].value` 应和总体概览同币种 `总盈亏`、`display_payload.accountPnl` 一致；当前持仓顶部卡是持仓内浮盈，不参与这个账户级对账。折人民币后的差异只允许来自实时汇率重取和小数四舍五入。月度、阶段账单和复盘日历必须聚合 `daily_total_value`，不要用 `daily_float_value + realized_delta` 重新拆一遍。
 
 ## 当前最值得优化的口径点
 
@@ -209,11 +220,11 @@
    - 建议明确拆成：原始投入成本、当前占用资金、策略资金、现金流本金、展示折算资金。
 
 2. 统一展示 payload 需要继续扩面。
-   - 当前已覆盖持仓总计、分币种持仓、最新日浮盈、已实现交易列表、已实现日汇总、交易标签、资金口径和数据质量。
+   - 当前已覆盖持仓总计、账户总盈亏、分币种持仓、最新日浮盈、已实现交易列表、已实现日汇总、交易标签、资金口径和数据质量。
    - 后续收益曲线、总体概览、收益报告也应逐步读 `display_payload`，减少 DOM 反读和前端重复推导。
 
 3. 曲线收益率分母应继续显式化。
-   - 总收益曲线已经使用账户级资金流；个股月/年收益率已经对齐券商 App 持仓盈亏率口径，仍持仓标的用调整后持仓成本，已清仓标的用投入本金。
+   - 总收益曲线已经把日收益率分母落成 `return_basis = 昨日持仓市值 + 今日买入金额`；个股月/年收益率已经对齐券商 App 持仓盈亏率口径，仍持仓标的用调整后持仓成本，已清仓标的用投入本金。
    - 下一步建议让曲线点直接带 `daily_return`、`cumulative_return`、`return_basis`，减少前端临时推导。
 
 4. 已实现、浮盈、合计需要全站同一来源。

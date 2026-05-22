@@ -10,7 +10,13 @@ from .display_payload import holdings_metrics_from_payload
 from .historical_curve import build_stock_lots, close_for_day, fetch_histories_for_lots, unrealized_pnl
 from .html_tables import body_rows, cell_text, money_for_label, summary_table_match, table_labels, text_for_label
 from .market_data import current_fx_rates_to_cny, display_currency_label
-from .options import build_open_short_put_exposure_maps
+from .options import (
+    build_current_cycle_boundaries,
+    build_current_cycle_dividend_income_maps,
+    build_open_short_put_exposure_maps,
+    build_option_income_maps,
+    build_stock_realized_income_maps,
+)
 from .realized_analysis import build_realized_trades
 from .utils import clean_text
 
@@ -216,6 +222,23 @@ def reference_capital_for_day(day: date, lots, rates: dict[str, float], fallback
     return total if total > 0.000001 else float(fallback or 0.0)
 
 
+def current_cycle_applied_income_cny(core, rows: list[tuple[int, dict[int, object]]], active_keys: set[tuple[str, str]], rates: dict[str, float]) -> float:
+    if not active_keys:
+        return 0.0
+    boundaries = build_current_cycle_boundaries(core, rows)
+    option_adjustments = build_option_income_maps(core, rows, boundaries)
+    stock_adjustments = build_stock_realized_income_maps(core, rows, boundaries)
+    dividend_adjustments = build_current_cycle_dividend_income_maps(core, {}, boundaries)
+    total = 0.0
+    for key in active_keys:
+        currency = key[1]
+        income = float(option_adjustments.get(key, {}).get("closed_income", 0.0))
+        income += float(stock_adjustments.get(key, 0.0))
+        income += float(dividend_adjustments.get(key, 0.0))
+        total += income * rates.get(currency, 1.0)
+    return total
+
+
 def summarize_reference_range(
     key: str,
     label: str,
@@ -276,6 +299,10 @@ def reference_float_metrics(core, rows: list[tuple[int, dict[int, object]]], met
     if lots:
         rates = current_fx_rates_to_cny()
         histories = fetch_histories_for_lots(core, lots)
+        active_keys = {(lot.ticker, lot.currency) for lot in lots}
+        applied_income = current_cycle_applied_income_cny(core, rows, active_keys, rates)
+        float_pnl = metrics.get("float_pnl")
+        raw_live_total = float(float_pnl) - applied_income if float_pnl is not None else None
         for key, label, start in [
             ("month", f"{today.month}月现持仓浮盈", date(today.year, today.month, 1)),
             ("three-month", "近三月现持仓浮盈", shift_months(today, -3)),
@@ -289,7 +316,7 @@ def reference_float_metrics(core, rows: list[tuple[int, dict[int, object]]], met
                 lots,
                 histories,
                 rates,
-                metrics.get("float_pnl"),
+                raw_live_total,
                 cost,
             )
     return {"active": "day", "ranges": ranges}
@@ -500,21 +527,19 @@ def render_holdings_account_panel(metrics: dict[str, float], month: dict[str, ob
     market_value = metrics.get("market_value")
     cost = metrics.get("cost")
     float_pnl = metrics.get("float_pnl")
-    float_rate = float_pnl / cost if cost else None
-    month_metric = render_holdings_realized_metric(month)
-    reference_metric = render_reference_metric(reference or reference_float_metrics(None, [], metrics))
+    daily_pnl = metrics.get("daily_pnl")
+    holding_rate = float_pnl / cost if cost else None
+    daily_rate = daily_pnl / cost if cost else None
 
     return f"""
             <div class="holdings-account-panel">
               <div class="holdings-account-grid">
                 {render_metric("持仓总资产", format_money(asset), "", "折人民币，不含现金和卖出认沽占用", asset, False, "折{currency}，不含现金和卖出认沽占用")}
-                {render_metric("总盈亏", format_signed_money(float_pnl), tone_class(float_pnl), format_percent(float_rate), float_pnl, True)}
+                {render_metric("总盈亏", format_signed_money(float_pnl), tone_class(float_pnl), format_percent(holding_rate), float_pnl, True)}
                 {render_metric("总市值", format_money(market_value), "", "按仓位绝对值，含卖出认沽占用", market_value)}
-                {reference_metric}
-                {month_metric}
+                {render_metric("当日盈亏", format_signed_money(daily_pnl), tone_class(daily_pnl), format_percent(daily_rate), daily_pnl, True)}
               </div>
             </div>
-            {render_holdings_range_script()}
 """
 
 
@@ -533,9 +558,7 @@ def insert_holdings_account_overview(core, html_text: str, rows: list[tuple[int,
     metrics = holdings_metrics_from_display_payload(state.DISPLAY_PAYLOAD)
     if not metrics:
         metrics = holdings_metrics_from_table(core, table_match.group(0), rows)
-    month = realized_range_metrics(core, rows)
-    reference = reference_float_metrics(core, rows, metrics)
-    panel = render_holdings_account_panel(metrics, month, reference)
+    panel = render_holdings_account_panel(metrics, {}, None)
     if not panel:
         return html_text
     return html_text[:insertion_index] + panel + html_text[insertion_index:]

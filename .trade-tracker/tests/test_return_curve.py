@@ -57,15 +57,54 @@ class ReturnCurveTests(unittest.TestCase):
                         "currency": "人民币",
                         "capital": 100,
                         "points": [
-                            {"date": "2026/05/01", "serial": 46143, "value": 10, "capital": 100, "market_value": 110, "net_flow": 100},
-                            {"date": "2026/05/03", "serial": 46145, "value": 20, "capital": 120, "market_value": 140, "net_flow": -20},
+                            {
+                                "date": "2026/05/01",
+                                "serial": 46143,
+                                "value": 10,
+                                "pure_total_value": 9,
+                                "pure_float_value": 6,
+                                "capital": 100,
+                                "market_value": 110,
+                                "principal": 100,
+                                "account_equity": 104,
+                                "net_flow": 100,
+                                "daily_float_value": 3,
+                                "daily_total_value": 4,
+                            },
+                            {
+                                "date": "2026/05/03",
+                                "serial": 46145,
+                                "value": 20,
+                                "pure_total_value": 18,
+                                "pure_float_value": 12,
+                                "capital": 120,
+                                "market_value": 140,
+                                "principal": 120,
+                                "account_equity": 146,
+                                "net_flow": -20,
+                                "daily_float_value": 5,
+                                "daily_total_value": 6,
+                            },
                         ],
                     },
                     {
                         "currency": "港币",
                         "capital": 200,
                         "points": [
-                            {"date": "2026/05/02", "serial": 46144, "value": 30, "capital": 200, "market_value": 230, "net_flow": 50},
+                            {
+                                "date": "2026/05/02",
+                                "serial": 46144,
+                                "value": 30,
+                                "pure_total_value": 25,
+                                "pure_float_value": 23,
+                                "capital": 200,
+                                "market_value": 230,
+                                "principal": 200,
+                                "account_equity": 230,
+                                "net_flow": 50,
+                                "daily_float_value": 7,
+                                "daily_total_value": 8,
+                            },
                         ],
                     },
                 ]
@@ -76,11 +115,27 @@ class ReturnCurveTests(unittest.TestCase):
         self.assertAlmostEqual(series["points"][1]["value"], 37.0)
         self.assertAlmostEqual(series["points"][1]["capital"], 280.0)
         self.assertAlmostEqual(series["points"][1]["market_value"], 317.0)
+        self.assertAlmostEqual(series["points"][1]["principal"], 280.0)
+        self.assertAlmostEqual(series["points"][1]["account_equity"], 317.0)
+        self.assertAlmostEqual(series["points"][1]["holding_market_value"], 317.0)
+        self.assertAlmostEqual(series["points"][1]["return_basis"], 110.0)
         self.assertAlmostEqual(series["points"][1]["net_flow"], 45.0)
+        self.assertAlmostEqual(series["points"][1]["daily_float_value"], 6.3)
+        self.assertAlmostEqual(series["points"][1]["daily_total_value"], 7.2)
+        self.assertAlmostEqual(series["points"][1]["pure_total_value"], 31.5)
+        self.assertAlmostEqual(series["points"][1]["pure_float_value"], 26.7)
         self.assertAlmostEqual(series["points"][2]["value"], 47.0)
         self.assertAlmostEqual(series["points"][2]["capital"], 300.0)
         self.assertAlmostEqual(series["points"][2]["market_value"], 347.0)
+        self.assertAlmostEqual(series["points"][2]["principal"], 300.0)
+        self.assertAlmostEqual(series["points"][2]["account_equity"], 347.0)
+        self.assertAlmostEqual(series["points"][2]["holding_market_value"], 347.0)
+        self.assertAlmostEqual(series["points"][2]["return_basis"], 317.0)
         self.assertAlmostEqual(series["points"][2]["net_flow"], -20.0)
+        self.assertAlmostEqual(series["points"][2]["daily_float_value"], 5.0)
+        self.assertAlmostEqual(series["points"][2]["daily_total_value"], 6.0)
+        self.assertAlmostEqual(series["points"][2]["pure_total_value"], 40.5)
+        self.assertAlmostEqual(series["points"][2]["pure_float_value"], 32.7)
 
     def test_curve_payload_collapses_same_day_to_last_point(self):
         with (
@@ -173,15 +228,21 @@ class ReturnCurveTests(unittest.TestCase):
         self.assertIn("cumulativeReturnValue", html)
         self.assertIn("cumulativeAmountValue", html)
         self.assertIn("dailyAmountValue: dailyProfit", html)
-        self.assertIn("rangeBaseAmount", html)
+        self.assertIn("let accountAmountTotal = 0", html)
         self.assertIn("amountValue: periodAmount", html)
         self.assertIn("rawAmountValue: floatAmount", html)
         self.assertIn("profitValueForPoint", html)
         self.assertIn("accountAssetValue", html)
-        self.assertIn("externalFlowForPoint", html)
+        self.assertIn("holdingMarketValue", html)
+        self.assertIn("pointNumberValue(point, 'holding_market_value')", html)
+        self.assertIn("pointNumberValue(point, 'return_basis')", html)
+        self.assertIn("dailyBuyAmount", html)
+        self.assertIn("dailySellAmount", html)
         self.assertIn("pointNumberValue", html)
-        self.assertIn("currentAsset - previousAsset", html)
-        self.assertIn("assetChange - externalFlow", html)
+        self.assertIn("currentMarket - previousMarket", html)
+        self.assertIn("marketChange - buyAmount + sellAmount", html)
+        self.assertIn("pointNumberValue(point, 'daily_total_value')", html)
+        self.assertIn("accountAmountTotal += dailyProfit", html)
         self.assertIn("let accountReturnGrowth = 1", html)
         self.assertIn("accountReturnGrowth *= 1 + dailyReturn / 100", html)
         self.assertNotIn("rangeMode === 'all' ? pointCapital : periodCapital", html)
@@ -247,7 +308,7 @@ class ReturnCurveTests(unittest.TestCase):
         self.assertIn("benchmarkAmountTotal", html)
         self.assertIn("pointBeforeSerial", html)
         self.assertIn("const previousAccountPoint = pointBeforeSerial(accountValues, benchmarkSerial)", html)
-        self.assertIn("const benchmarkCapital = accountAssetValue(previousAccountPoint) || accountAssetValue(accountPoint) || referenceCapital", html)
+        self.assertIn("const benchmarkCapital = returnBaseForPoint(accountPoint, previousAccountPoint) || referenceCapital", html)
         self.assertIn("trade-tracker-return-curve-money-hidden-v1", html)
         self.assertIn("displaySignedMoneyText", html)
         self.assertIn("moneyHidden()", html)
@@ -272,7 +333,12 @@ class ReturnCurveTests(unittest.TestCase):
             key = return_curve_module.benchmark_cache_key("1.000001", "2026-05-01", "2026-05-07")
             cached_points = [{"date": "2026/05/07", "iso": "2026-05-07", "serial": 46149, "close": 100}]
             cache_path.write_text(
-                json.dumps({"version": 1, "ranges": {key: {"fetched_at": date.today().isoformat(), "points": cached_points}}}),
+                json.dumps(
+                    {
+                        "version": return_curve_module.BENCHMARK_CACHE_VERSION,
+                        "ranges": {key: {"fetched_at": date.today().isoformat(), "points": cached_points}},
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -284,6 +350,31 @@ class ReturnCurveTests(unittest.TestCase):
 
         self.assertEqual(points, cached_points)
         fetch_online.assert_not_called()
+
+    def test_load_benchmark_cache_discards_old_schema(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "benchmark_history.json"
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": return_curve_module.BENCHMARK_CACHE_VERSION - 1,
+                        "benchmarks": {
+                            "1.000001": {
+                                "fetched_at": date.today().isoformat(),
+                                "points": [{"date": "2026/05/07", "iso": "2026-05-07", "serial": 46149, "close": 1}],
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(return_curve_module, "BENCHMARK_CACHE_PATH", cache_path):
+                cache = return_curve_module.load_benchmark_cache()
+
+        self.assertEqual(cache["version"], return_curve_module.BENCHMARK_CACHE_VERSION)
+        self.assertEqual(cache["benchmarks"], {})
+        self.assertEqual(cache["ranges"], {})
 
     def test_fetch_tencent_benchmark_points_converts_history_points(self):
         history_point = SimpleNamespace(iso="2026-05-07", close=3100.5)
@@ -374,7 +465,12 @@ class ReturnCurveTests(unittest.TestCase):
             cached_points = [{"date": "2025/01/20", "iso": "2025-01-20", "serial": 45677, "close": 1200}]
             online_points = [{"date": "2022/04/11", "iso": "2022-04-11", "serial": 44662, "close": 1146.55}]
             cache_path.write_text(
-                json.dumps({"version": 1, "ranges": {key: {"fetched_at": date.today().isoformat(), "points": cached_points}}}),
+                json.dumps(
+                    {
+                        "version": return_curve_module.BENCHMARK_CACHE_VERSION,
+                        "ranges": {key: {"fetched_at": date.today().isoformat(), "points": cached_points}},
+                    }
+                ),
                 encoding="utf-8",
             )
 
@@ -487,6 +583,43 @@ class ReturnCurveTests(unittest.TestCase):
                 points = return_curve_module.fetch_benchmark_points("1.000001", previous_iso, today_iso)
 
         self.assertEqual([point["iso"] for point in points], [previous_iso, today_iso])
+        fetch_realtime.assert_called_once_with("sh000001", today_iso)
+        fetch_online.assert_not_called()
+
+    def test_fetch_benchmark_points_refreshes_cached_today_tail(self):
+        today_iso = date.today().isoformat()
+        previous_iso = (date.today() - timedelta(days=1)).isoformat()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            cache_path = Path(temp_dir) / "benchmark_history.json"
+            cached_points = [
+                {"date": previous_iso.replace("-", "/"), "iso": previous_iso, "serial": 46155, "close": 100},
+                {"date": today_iso.replace("-", "/"), "iso": today_iso, "serial": 46156, "close": 98},
+            ]
+            realtime_point = {"date": today_iso.replace("-", "/"), "iso": today_iso, "serial": 46156, "close": 103}
+            cache_path.write_text(
+                json.dumps(
+                    {
+                        "version": return_curve_module.BENCHMARK_CACHE_VERSION,
+                        "benchmarks": {
+                            "1.000001": {
+                                "fetched_at": date.today().isoformat(),
+                                "checked_end_iso": today_iso,
+                                "points": cached_points,
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch.object(return_curve_module, "BENCHMARK_CACHE_PATH", cache_path),
+                patch.object(return_curve_module, "fetch_tencent_realtime_benchmark_point", return_value=realtime_point) as fetch_realtime,
+                patch.object(return_curve_module, "fetch_benchmark_points_online", return_value=[]) as fetch_online,
+            ):
+                points = return_curve_module.fetch_benchmark_points("1.000001", previous_iso, today_iso)
+
+        self.assertEqual([point["close"] for point in points], [100, 103])
         fetch_realtime.assert_called_once_with("sh000001", today_iso)
         fetch_online.assert_not_called()
 

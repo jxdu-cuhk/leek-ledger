@@ -53,7 +53,7 @@ CSINDEX_BENCHMARK_TIMEOUT = 2
 TENCENT_REALTIME_TIMEOUT = 2
 BENCHMARK_CACHE_PATH = APP_DIR / "tools" / "cache" / "benchmark_history.json"
 BENCHMARK_CACHE_TTL_DAYS = 7
-BENCHMARK_CACHE_VERSION = 2
+BENCHMARK_CACHE_VERSION = 3
 BENCHMARK_FETCH_WORKERS = 12
 STAR_COMPOSITE_START_ISO = "2022-04-11"
 
@@ -93,6 +93,8 @@ def load_benchmark_cache() -> dict[str, object]:
     except (OSError, ValueError):
         payload = {}
     if not isinstance(payload, dict):
+        payload = {}
+    if payload.get("version") != BENCHMARK_CACHE_VERSION:
         payload = {}
     ranges = payload.get("ranges")
     if not isinstance(ranges, dict):
@@ -580,6 +582,18 @@ def prepare_benchmark_cache_request(
             changed = prune_benchmark_range_cache(ranges, cache_id) or changed
             changed = True
     if benchmark_entry_covers(entry, cached_points, start_iso, end_iso, require_start=requires_start_coverage(benchmark)):
+        tencent_symbol = clean_text(benchmark.get("tencent")) or benchmark_tencent_symbol(clean_text(benchmark.get("secid")))
+        if end == date.today() and tencent_symbol:
+            return {
+                "hit": False,
+                "changed": changed,
+                "benchmark": benchmark,
+                "cache_id": cache_id,
+                "start_iso": start_iso,
+                "end_iso": end_iso,
+                "cached_points": cached_points,
+                "fetch_ranges": [(end, end)],
+            }
         return {
             "hit": True,
             "changed": changed,
@@ -619,10 +633,10 @@ def fetch_benchmark_request_online(request: dict[str, object]) -> list[dict[str,
             continue
         if range_start == range_end == date.today():
             tencent_symbol = clean_text(benchmark.get("tencent")) or benchmark_tencent_symbol(clean_text(benchmark.get("secid")))
-            realtime_point = fetch_tencent_realtime_benchmark_point(tencent_symbol, range_end.isoformat())
+            realtime_point = fetch_tencent_realtime_benchmark_point(tencent_symbol, range_end.isoformat()) if tencent_symbol else None
             if realtime_point:
                 fetched.append(realtime_point)
-            continue
+                continue
         fetched.extend(fetch_benchmark_points_online(benchmark, range_start.isoformat(), range_end.isoformat()))
     return fetched
 
@@ -732,7 +746,25 @@ def normalize_curve_points(points: list[dict[str, object]]) -> list[dict[str, ob
             "serial": serial,
             "value": value,
         }
-        for key in ("float_value", "realized_value", "total_value", "market_value", "net_flow"):
+        for key in (
+            "float_value",
+            "pure_float_value",
+            "daily_float_value",
+            "daily_total_value",
+            "realized_value",
+            "total_value",
+            "pure_total_value",
+            "account_equity",
+            "holding_market_value",
+            "daily_buy_amount",
+            "daily_sell_amount",
+            "cumulative_buy_amount",
+            "cumulative_sell_amount",
+            "return_basis",
+            "market_value",
+            "principal",
+            "net_flow",
+        ):
             extra_value = parse_float(point.get(key))
             if extra_value is not None:
                 by_day[iso][key] = extra_value
@@ -766,7 +798,25 @@ def converted_series(series_list: list[dict[str, object]]) -> list[dict[str, obj
                 "serial": point["serial"],
                 "value": value * rate,
             }
-            for key in ("float_value", "realized_value", "total_value", "market_value", "net_flow"):
+            for key in (
+                "float_value",
+                "pure_float_value",
+                "daily_float_value",
+                "daily_total_value",
+                "realized_value",
+                "total_value",
+                "pure_total_value",
+                "account_equity",
+                "holding_market_value",
+                "daily_buy_amount",
+                "daily_sell_amount",
+                "cumulative_buy_amount",
+                "cumulative_sell_amount",
+                "return_basis",
+                "market_value",
+                "principal",
+                "net_flow",
+            ):
                 extra_value = parse_float(point.get(key))
                 if extra_value is not None:
                     converted_point[key] = extra_value * rate
@@ -806,6 +856,7 @@ def combine_series_to_cny(
     combined_points = []
     last_points: list[dict[str, object] | None] = [None] * len(series_items)
     indexes = [0] * len(series_items)
+    previous_combined_return_market = 0.0
     for iso in sorted(by_iso):
         for index, series in enumerate(series_items):
             points = list(series["points"])
@@ -815,21 +866,89 @@ def combine_series_to_cny(
         total_value = 0.0
         total_capital = 0.0
         total_float = 0.0
+        total_pure_float = 0.0
         total_realized = 0.0
         total_total = 0.0
+        total_pure_total = 0.0
+        total_account_equity = 0.0
+        total_holding_market = 0.0
         total_market = 0.0
+        total_principal = 0.0
         total_net_flow = 0.0
+        total_daily_float = 0.0
+        total_daily_total = 0.0
+        total_daily_buy = 0.0
+        total_daily_sell = 0.0
+        total_cumulative_buy = 0.0
+        total_cumulative_sell = 0.0
+        has_principal = False
+        has_account_equity = False
+        has_holding_market = False
+        has_pure_float = False
+        has_pure_total = False
+        has_daily_float = False
+        has_daily_total = False
+        has_daily_buy = False
+        has_daily_sell = False
+        has_cumulative_buy = False
+        has_cumulative_sell = False
         for series, point in zip(series_items, last_points):
             if not point:
                 continue
             is_current_day = str(point.get("iso")) == iso
             total_value += parse_float(point.get("value")) or 0.0
             total_float += parse_float(point.get("float_value")) or parse_float(point.get("value")) or 0.0
+            pure_float = parse_float(point.get("pure_float_value"))
+            if pure_float is not None:
+                total_pure_float += pure_float
+                has_pure_float = True
             total_realized += parse_float(point.get("realized_value")) or 0.0
             total_total += parse_float(point.get("total_value")) or parse_float(point.get("value")) or 0.0
+            pure_total = parse_float(point.get("pure_total_value"))
+            if pure_total is not None:
+                total_pure_total += pure_total
+                has_pure_total = True
+            account_equity = parse_float(point.get("account_equity"))
+            if account_equity is not None:
+                total_account_equity += account_equity
+                has_account_equity = True
+            holding_market = parse_float(point.get("holding_market_value"))
+            if holding_market is None:
+                holding_market = parse_float(point.get("market_value"))
+            if holding_market is not None:
+                total_holding_market += holding_market
+                has_holding_market = True
             total_market += parse_float(point.get("market_value")) or 0.0
+            principal = parse_float(point.get("principal"))
+            if principal is not None:
+                total_principal += principal
+                has_principal = True
+            cumulative_buy = parse_float(point.get("cumulative_buy_amount"))
+            if cumulative_buy is not None:
+                total_cumulative_buy += cumulative_buy
+                has_cumulative_buy = True
+            cumulative_sell = parse_float(point.get("cumulative_sell_amount"))
+            if cumulative_sell is not None:
+                total_cumulative_sell += cumulative_sell
+                has_cumulative_sell = True
             if is_current_day:
                 total_net_flow += parse_float(point.get("net_flow")) or 0.0
+                daily_float = parse_float(point.get("daily_float_value"))
+                daily_total = parse_float(point.get("daily_total_value"))
+                daily_buy = parse_float(point.get("daily_buy_amount"))
+                daily_sell = parse_float(point.get("daily_sell_amount"))
+                if daily_float is not None:
+                    total_daily_float += daily_float
+                    has_daily_float = True
+                if daily_total is not None:
+                    total_daily_total += daily_total
+                    has_daily_total = True
+                if daily_buy is not None:
+                    total_daily_buy += daily_buy
+                    has_daily_buy = True
+                if daily_sell is not None:
+                    total_daily_sell += daily_sell
+                    has_daily_sell = True
             point_capital = parse_float(point.get("capital"))
             total_capital += point_capital if point_capital is not None else parse_float(series.get("capital")) or 0.0
         base = by_iso[iso]
@@ -844,9 +963,35 @@ def combine_series_to_cny(
             "market_value": total_market,
             "net_flow": total_net_flow,
         }
+        if has_holding_market:
+            combined_point["holding_market_value"] = total_holding_market
+            combined_point["account_equity"] = total_market
+        if has_principal:
+            combined_point["principal"] = total_principal
+        if has_account_equity and not has_holding_market:
+            combined_point["account_equity"] = total_account_equity
+        if has_daily_float:
+            combined_point["daily_float_value"] = total_daily_float
+        if has_daily_total:
+            combined_point["daily_total_value"] = total_daily_total
+        if has_daily_buy:
+            combined_point["daily_buy_amount"] = total_daily_buy
+        if has_daily_sell:
+            combined_point["daily_sell_amount"] = total_daily_sell
+        if has_cumulative_buy:
+            combined_point["cumulative_buy_amount"] = total_cumulative_buy
+        if has_cumulative_sell:
+            combined_point["cumulative_sell_amount"] = total_cumulative_sell
+        if has_holding_market or has_daily_buy:
+            combined_point["return_basis"] = previous_combined_return_market + total_daily_buy
+        if has_pure_float:
+            combined_point["pure_float_value"] = total_pure_float
+        if has_pure_total:
+            combined_point["pure_total_value"] = total_pure_total
         if total_capital > 0.000001:
             combined_point["capital"] = total_capital
         combined_points.append(combined_point)
+        previous_combined_return_market = total_market
 
     capital = parse_float(combined_points[-1].get("capital")) if combined_points else None
     if capital is None:
@@ -1372,6 +1517,22 @@ def render_curve_script(payload: list[dict[str, object]]) -> str:
                     const start = rangeStart(range, latest, customStart);
                     const end = rangeEnd(range, latest, customEnd);
                     const source = (points || []).filter((point) => point && point.iso);
+                    function syntheticRangeAnchor(point, iso) {{
+                      const serial = serialFromIso(iso);
+                      if (!point || !Number.isFinite(serial)) return null;
+                      return {{
+                        ...point,
+                        iso,
+                        date: dateLabelFromIso(iso),
+                        serial,
+                        daily_float_value: 0,
+                        daily_total_value: 0,
+                        daily_buy_amount: 0,
+                        daily_sell_amount: 0,
+                        net_flow: 0,
+                        synthetic_range_anchor: true,
+                      }};
+                    }}
                     if (range === 'day') {{
                       const dayPoints = source.filter((point) => !end || point.iso <= end).slice(-2);
                       return dayPoints.length ? dayPoints : source.slice(-1);
@@ -1386,16 +1547,13 @@ def render_curve_script(payload: list[dict[str, object]]) -> str:
                       if (filtered[0]?.iso === start) return filtered;
                       const anchor = source.filter((point) => point.iso < start).slice(-1)[0];
                       if (!anchor) return filtered;
-                      const serial = serialFromIso(start);
-                      if (!Number.isFinite(serial)) return filtered;
-                      return [{{ ...anchor, iso: start, date: dateLabelFromIso(start), serial }}].concat(filtered);
+                      const anchorPoint = syntheticRangeAnchor(anchor, start);
+                      return anchorPoint ? [anchorPoint].concat(filtered) : filtered;
                     }}
                     const anchor = source.filter((point) => (!end || point.iso <= end)).slice(-1)[0] || source.slice(-1)[0];
                     if (!anchor) return [];
-                    const serial = serialFromIso(start);
-                    return Number.isFinite(serial)
-                      ? [{{ ...anchor, iso: start, date: dateLabelFromIso(start), serial }}]
-                      : [anchor];
+                    const anchorPoint = syntheticRangeAnchor(anchor, start);
+                    return anchorPoint ? [anchorPoint] : [anchor];
                   }}
 
                   function benchmarkBaseClose(points, range, latest, customStart, customEnd, visiblePoints) {{
@@ -2149,56 +2307,83 @@ def render_curve_script(payload: list[dict[str, object]]) -> str:
                       const value = Number(point[key]);
                       return Number.isFinite(value) ? value : NaN;
                     }}
-                    function accountAssetValue(point) {{
+                    function holdingMarketValue(point) {{
                       if (!point) return NaN;
+                      const holdingMarket = pointNumberValue(point, 'holding_market_value');
+                      if (Number.isFinite(holdingMarket)) return holdingMarket;
                       const marketValue = pointNumberValue(point, 'market_value');
                       if (Number.isFinite(marketValue)) return Math.max(marketValue, 0);
+                      const accountEquity = pointNumberValue(point, 'account_equity');
+                      if (accountEquity >= 0) return accountEquity;
+                      const principal = pointNumberValue(point, 'principal');
+                      const totalValue = profitValueForPoint(point);
+                      if (principal > 0 && Number.isFinite(totalValue)) return Math.max(principal + totalValue, 0);
                       const pointCapital = pointNumberValue(point, 'capital');
                       const floatValue = Number(point?.float_value);
                       if (pointCapital >= 0 && Number.isFinite(floatValue)) return Math.max(pointCapital + floatValue, 0);
-                      const totalValue = profitValueForPoint(point);
                       if (pointCapital >= 0 && Number.isFinite(totalValue)) return Math.max(pointCapital + totalValue, 0);
                       const carried = capitalForPoint(point);
                       return carried > 0 && Number.isFinite(totalValue) ? Math.max(carried + totalValue, 0) : NaN;
                     }}
-                    function externalFlowForPoint(point) {{
-                      const flow = Number(point?.net_flow ?? point?.flow ?? 0);
-                      return Number.isFinite(flow) ? flow : 0;
+                    function returnMarketValue(point) {{
+                      if (!point) return NaN;
+                      const marketValue = pointNumberValue(point, 'market_value');
+                      if (Number.isFinite(marketValue)) return Math.max(marketValue, 0);
+                      const holdingMarket = holdingMarketValue(point);
+                      return Number.isFinite(holdingMarket) ? Math.abs(holdingMarket) : NaN;
+                    }}
+                    function dailyBuyAmount(point) {{
+                      const amount = pointNumberValue(point, 'daily_buy_amount');
+                      return Number.isFinite(amount) ? amount : 0;
+                    }}
+                    function dailySellAmount(point) {{
+                      const amount = pointNumberValue(point, 'daily_sell_amount');
+                      return Number.isFinite(amount) ? amount : 0;
                     }}
                     function referenceCapitalFor(visiblePoints, fallbackCapital) {{
                       const capitals = (visiblePoints || [])
-                        .map((point) => accountAssetValue(point))
+                        .map((point) => holdingMarketValue(point))
                         .filter((value) => Number.isFinite(value) && value > 0);
                       if (!capitals.length) return fallbackCapital > 0 ? fallbackCapital : capital;
                       return Math.max(...capitals);
                     }}
                     let referenceCapital = referenceCapitalFor(points, baseCapital);
                     function returnBaseForPoint(point, previousPoint) {{
-                      const previousAsset = accountAssetValue(previousPoint);
-                      if (previousAsset > 0) return previousAsset;
-                      const currentAsset = accountAssetValue(point);
-                      if (currentAsset > 0) return currentAsset;
+                      const explicitBasis = pointNumberValue(point, 'return_basis');
+                      if (explicitBasis > 0) return explicitBasis;
+                      const previousMarket = returnMarketValue(previousPoint);
+                      const buyAmount = dailyBuyAmount(point);
+                      if (previousMarket >= 0 || buyAmount > 0) {{
+                        const basis = Math.max(previousMarket || 0, 0) + Math.max(buyAmount, 0);
+                        if (basis > 0) return basis;
+                      }}
+                      const currentMarket = holdingMarketValue(point);
+                      if (currentMarket > 0) return currentMarket;
                       return baseCapital;
                     }}
                     function accountValuesFrom(visiblePoints, periodCapital, rangeMode) {{
-                      const rangeBaseAmount = rangeMode === 'all' ? 0 : profitValueForPoint(visiblePoints[0]);
+                      let accountAmountTotal = 0;
                       let accountReturnGrowth = 1;
                       return visiblePoints.map((point, index) => {{
                         const previousPoint = index > 0 ? visiblePoints[index - 1] : null;
-                        const dailyProfit = previousPoint ? profitValueForPoint(point) - profitValueForPoint(previousPoint) : 0;
-                        const currentAsset = accountAssetValue(point);
-                        const previousAsset = previousPoint ? accountAssetValue(previousPoint) : currentAsset;
-                        const assetChange = previousPoint && Number.isFinite(currentAsset) && Number.isFinite(previousAsset)
-                          ? currentAsset - previousAsset
+                        const currentMarket = holdingMarketValue(point);
+                        const previousMarket = previousPoint ? holdingMarketValue(previousPoint) : currentMarket;
+                        const marketChange = previousPoint && Number.isFinite(currentMarket) && Number.isFinite(previousMarket)
+                          ? currentMarket - previousMarket
                           : 0;
+                        const explicitDailyTotal = pointNumberValue(point, 'daily_total_value');
+                        const includeCurrentPoint = Number.isFinite(explicitDailyTotal) || Boolean(previousPoint) || rangeMode === 'all';
                         const returnBase = returnBaseForPoint(point, previousPoint);
-                        const externalFlow = previousPoint ? externalFlowForPoint(point) : 0;
-                        const investmentPnl = assetChange - externalFlow;
+                        const buyAmount = includeCurrentPoint ? dailyBuyAmount(point) : 0;
+                        const sellAmount = includeCurrentPoint ? dailySellAmount(point) : 0;
+                        const investmentPnl = Number.isFinite(explicitDailyTotal) ? explicitDailyTotal : marketChange - buyAmount + sellAmount;
+                        const dailyProfit = includeCurrentPoint && Number.isFinite(investmentPnl) ? investmentPnl : 0;
+                        accountAmountTotal += dailyProfit;
                         const dailyReturn = returnBase > 0 ? (investmentPnl / returnBase) * 100 : 0;
-                        if (index > 0 && Number.isFinite(dailyReturn)) accountReturnGrowth *= 1 + dailyReturn / 100;
+                        if (includeCurrentPoint && Number.isFinite(dailyReturn)) accountReturnGrowth *= 1 + dailyReturn / 100;
                         const cumulativeReturnValue = (accountReturnGrowth - 1) * 100;
                         const floatAmount = profitValueForPoint(point);
-                        const periodAmount = floatAmount - rangeBaseAmount;
+                        const periodAmount = rangeMode === 'all' ? floatAmount : accountAmountTotal;
                         return {{
                           ...point,
                           dailyAmountValue: dailyProfit,
@@ -2207,8 +2392,10 @@ def render_curve_script(payload: list[dict[str, object]]) -> str:
                           cumulativeAmountValue: periodAmount,
                           rawAmountValue: floatAmount,
                           baseCapital: returnBase > 0 ? returnBase : baseCapital,
-                          accountAssetValue: currentAsset,
-                          externalFlow,
+                          accountAssetValue: currentMarket,
+                          holdingMarketValue: currentMarket,
+                          buyAmount,
+                          sellAmount,
                           referenceCapital: periodCapital,
                           returnValue: cumulativeReturnValue,
                           cumulativeReturnValue,
@@ -2230,7 +2417,7 @@ def render_curve_script(payload: list[dict[str, object]]) -> str:
                           const benchmarkSerial = Number(point.serial);
                           const previousAccountPoint = pointBeforeSerial(accountValues, benchmarkSerial);
                           const accountPoint = pointAtOrBeforeSerial(accountValues, benchmarkSerial);
-                          const benchmarkCapital = accountAssetValue(previousAccountPoint) || accountAssetValue(accountPoint) || referenceCapital;
+                          const benchmarkCapital = returnBaseForPoint(accountPoint, previousAccountPoint) || referenceCapital;
                           const dailyAmountValue = index > 0 && benchmarkCapital > 0
                             ? (dailyReturn / 100) * benchmarkCapital
                             : 0;

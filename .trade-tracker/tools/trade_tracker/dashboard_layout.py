@@ -12,7 +12,7 @@ PAGE_GROUPS = [
     {
         "key": "positions",
         "label": "持仓",
-        "titles": ["当前持仓", "资金口径 / 数据质量", "未平仓期权"],
+        "titles": ["当前持仓", "未平仓期权", "资金口径 / 数据质量"],
     },
     {
         "key": "returns",
@@ -480,6 +480,154 @@ def extract_curve_fallback_total(html_text: str) -> str:
     return re.sub(r"^(人民币|港币|美元)\s+", "", text).strip()
 
 
+def curve_number(value: object) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    return numeric if numeric == numeric and numeric not in {float("inf"), float("-inf")} else None
+
+
+def curve_profit_value(point: dict[str, object]) -> float:
+    total_value = curve_number(point.get("total_value"))
+    if total_value is not None:
+        return total_value
+    value = curve_number(point.get("value"))
+    return value if value is not None else 0.0
+
+
+def curve_account_asset(point: dict[str, object] | None, carried_capital_by_iso: dict[str, float], fallback_capital: float) -> float | None:
+    if not point:
+        return None
+    holding_market = curve_number(point.get("holding_market_value"))
+    if holding_market is not None and holding_market >= 0:
+        return holding_market
+    market_value = curve_number(point.get("market_value"))
+    if market_value is not None:
+        return max(market_value, 0.0)
+    account_equity = curve_number(point.get("account_equity"))
+    if account_equity is not None and account_equity >= 0:
+        return account_equity
+    principal = curve_number(point.get("principal"))
+    total_value = curve_profit_value(point)
+    if principal is not None and principal > 0:
+        return max(principal + total_value, 0.0)
+    point_capital = curve_number(point.get("capital"))
+    float_value = curve_number(point.get("float_value"))
+    if point_capital is not None and point_capital >= 0 and float_value is not None:
+        return max(point_capital + float_value, 0.0)
+    if point_capital is not None and point_capital >= 0:
+        return max(point_capital + total_value, 0.0)
+    carried = carried_capital_by_iso.get(clean_text(point.get("iso")))
+    if carried and carried > 0:
+        return max(carried + total_value, 0.0)
+    if fallback_capital > 0:
+        return max(fallback_capital + total_value, 0.0)
+    return None
+
+
+def curve_daily_buy(point: dict[str, object] | None) -> float:
+    if not point:
+        return 0.0
+    value = curve_number(point.get("daily_buy_amount"))
+    return value if value is not None else 0.0
+
+
+def curve_daily_sell(point: dict[str, object] | None) -> float:
+    if not point:
+        return 0.0
+    value = curve_number(point.get("daily_sell_amount"))
+    return value if value is not None else 0.0
+
+
+def curve_return_basis(
+    point: dict[str, object] | None,
+    previous: dict[str, object] | None,
+    carried_capital_by_iso: dict[str, float],
+    fallback_capital: float,
+) -> float | None:
+    explicit = curve_number(point.get("return_basis")) if point else None
+    if explicit is not None and explicit > 0:
+        return explicit
+    previous_market = curve_account_asset(previous, carried_capital_by_iso, fallback_capital) if previous else 0.0
+    basis = max(previous_market or 0.0, 0.0) + max(curve_daily_buy(point), 0.0)
+    if basis > 0:
+        return basis
+    current_market = curve_account_asset(point, carried_capital_by_iso, fallback_capital)
+    if current_market and current_market > 0:
+        return current_market
+    return fallback_capital if fallback_capital > 0 else None
+
+
+def format_curve_money(value: float | None) -> str:
+    if value is None:
+        return ""
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:,.2f}"
+
+
+def format_curve_percent(value: float | None) -> str:
+    if value is None:
+        return ""
+    sign = "+" if value > 0 else ""
+    return f"{sign}{value:.2f}%"
+
+
+def extract_curve_initial_metrics(section_html: str) -> tuple[str, str]:
+    match = re.search(r'<script type="application/json" data-return-curve-json>(.*?)</script>', section_html, re.S)
+    if not match:
+        return "", ""
+    try:
+        payload = json.loads(html.unescape(match.group(1)))
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return "", ""
+    if not isinstance(payload, list) or not payload:
+        return "", ""
+    series = next(
+        (item for item in payload if isinstance(item, dict) and clean_text(item.get("scope")) == "all"),
+        next((item for item in payload if isinstance(item, dict)), None),
+    )
+    if not isinstance(series, dict):
+        return "", ""
+    points = [point for point in series.get("points", []) or [] if isinstance(point, dict) and clean_text(point.get("iso"))]
+    if not points:
+        return "", ""
+
+    carried_capital_by_iso: dict[str, float] = {}
+    carried_capital = 0.0
+    for point in points:
+        point_capital = curve_number(point.get("capital"))
+        if point_capital is not None and point_capital > carried_capital:
+            carried_capital = point_capital
+        iso = clean_text(point.get("iso"))
+        if iso and carried_capital > 0:
+            carried_capital_by_iso[iso] = carried_capital
+    series_capital = curve_number(series.get("capital"))
+    fallback_capital = series_capital if series_capital and series_capital > 0 else max(abs(curve_profit_value(points[-1])), 1.0)
+
+    amount_total = 0.0
+    return_growth = 1.0
+    for index, point in enumerate(points):
+        previous = points[index - 1] if index > 0 else None
+        current_asset = curve_account_asset(point, carried_capital_by_iso, fallback_capital)
+        previous_asset = curve_account_asset(previous, carried_capital_by_iso, fallback_capital) if previous else current_asset
+        explicit_daily = curve_number(point.get("daily_total_value"))
+        if explicit_daily is not None:
+            investment_pnl = explicit_daily
+        elif previous and current_asset is not None and previous_asset is not None:
+            investment_pnl = current_asset - previous_asset - curve_daily_buy(point) + curve_daily_sell(point)
+        else:
+            investment_pnl = 0.0
+
+        if index >= 0:
+            amount_total += investment_pnl
+            return_base = curve_return_basis(point, previous, carried_capital_by_iso, fallback_capital)
+            if return_base and return_base > 0:
+                return_growth *= 1 + investment_pnl / return_base
+
+    return format_curve_money(amount_total), format_curve_percent((return_growth - 1) * 100)
+
+
 def render_ths_curve_top(total_pnl: str, return_rate: str) -> str:
     total_text = total_pnl or "--"
     rate_text = return_rate or "--"
@@ -582,8 +730,9 @@ def apply_tonghuashun_curve_style(html_text: str) -> str:
     if '<div class="curve-grid' not in section:
         return html_text
 
-    total_pnl = extract_cny_overview_metric(html_text, "总盈亏") or extract_curve_fallback_total(section)
-    return_rate = extract_cny_overview_metric(html_text, "总收益率")
+    curve_total, curve_return = extract_curve_initial_metrics(section)
+    total_pnl = curve_total or extract_cny_overview_metric(html_text, "总盈亏") or extract_curve_fallback_total(section)
+    return_rate = curve_return or extract_cny_overview_metric(html_text, "总收益率")
     curve_top = render_ths_curve_top(total_pnl, return_rate)
     curve_summary = render_ths_curve_summary(return_rate)
 
@@ -594,7 +743,7 @@ def apply_tonghuashun_curve_style(html_text: str) -> str:
     )
     section = re.sub(
         r'<p class="section-note">.*?</p>',
-        '<p class="section-note">红线为历史每天的总盈亏：截至当天已实现盈亏 + 当天仍持仓的收盘浮盈/浮亏；收益率用截至当日历史最高持仓本金近似总资产基准，避免清仓换仓时分母突然变小。不同币种会按当前汇率统一折算，金额可在人民币、港币和美元之间切换；蓝线可切换对比 A 股、港股和美股主要指数。</p>',
+        '<p class="section-note">红线为历史每天的总盈亏，按持仓市值、累计买入和累计卖出重建；当日盈亏等于今日持仓市值减昨日持仓市值、扣今日买入并加今日卖出。收益率用当日盈亏除以昨日持仓市值加今日买入后逐日连乘，金额可在人民币、港币和美元之间切换；蓝线可切换对比 A 股、港股和美股主要指数。</p>',
         section,
         count=1,
         flags=re.S,

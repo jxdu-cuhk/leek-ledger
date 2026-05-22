@@ -22,6 +22,8 @@ HISTORY_CACHE_PATH = APP_DIR / "tools" / "cache" / "security_history.json"
 HISTORY_SOURCE_DIR = APP_DIR / "history"
 HISTORY_HTTP_TIMEOUT = 8
 HISTORY_WORKERS = 5
+RECENT_HISTORY_REFRESH_DAYS = 14
+RECENT_HISTORY_REFRESH_VERSION = 2
 EPSILON = 0.000001
 PRICE_SCALE_LOWER_BOUND = 0.67
 PRICE_SCALE_UPPER_BOUND = 1.5
@@ -67,6 +69,12 @@ class RealizedCurveEvent:
     pnl: float
     ticker: str = ""
     kind: str = ""
+
+
+@dataclass(frozen=True)
+class DailyTradeAmounts:
+    buy: float = 0.0
+    sell: float = 0.0
 
 
 def date_label(day: date) -> str:
@@ -159,6 +167,26 @@ def price_scale_was_checked_today(entry: object) -> bool:
     except ValueError:
         return False
     return checked_at >= date.today()
+
+
+def recent_refresh_start(start: date, end: date, today: date | None = None) -> date | None:
+    current = today or date.today()
+    window_start = current - timedelta(days=RECENT_HISTORY_REFRESH_DAYS)
+    if end < window_start:
+        return None
+    return max(start, window_start)
+
+
+def recent_history_was_refreshed(entry: object, today: date | None = None) -> bool:
+    if not isinstance(entry, dict):
+        return False
+    if parse_float(entry.get("recent_refresh_version")) != RECENT_HISTORY_REFRESH_VERSION:
+        return False
+    try:
+        refreshed_at = date.fromisoformat(clean_text(entry.get("recent_refreshed_at")))
+    except ValueError:
+        return False
+    return refreshed_at >= (today or date.today())
 
 
 def entry_covers(points: list[SecurityHistoryPoint], start: date, end: date, entry: object = None) -> bool:
@@ -318,7 +346,9 @@ def fetch_security_history_points(core, ticker: str, currency: str, start: date,
     key = history_cache_key(ticker, currency)
     entry = securities.get(key)
     cached_points = entry_points(entry)
-    if entry_covers(cached_points, start, end, entry):
+    recent_start = recent_refresh_start(start, end)
+    needs_recent_refresh = recent_start is not None and not recent_history_was_refreshed(entry)
+    if entry_covers(cached_points, start, end, entry) and not needs_recent_refresh:
         return slice_history_points(cached_points, start, end)
 
     fetch_ranges: list[tuple[date, date]] = []
@@ -331,6 +361,8 @@ def fetch_security_history_points(core, ticker: str, currency: str, start: date,
             fetch_ranges.append((start, first_cached - timedelta(days=1)))
         if end > last_cached:
             fetch_ranges.append((last_cached + timedelta(days=1), end))
+        if needs_recent_refresh and recent_start is not None:
+            fetch_ranges.append((recent_start, end))
 
     fetched: list[SecurityHistoryPoint] = []
     for range_start, range_end in fetch_ranges:
@@ -340,12 +372,16 @@ def fetch_security_history_points(core, ticker: str, currency: str, start: date,
 
     if fetched or cached_points:
         merged = merge_cache_points(cached_points, fetched)
-        securities[key] = {
+        next_entry = {
             "ticker": clean_text(ticker),
             "currency": clean_text(currency),
             "fetched_at": date.today().isoformat(),
             "points": serialize_history_points(merged),
         }
+        if needs_recent_refresh and fetched:
+            next_entry["recent_refreshed_at"] = date.today().isoformat()
+            next_entry["recent_refresh_version"] = RECENT_HISTORY_REFRESH_VERSION
+        securities[key] = next_entry
         save_history_cache(cache)
         if fetched:
             return slice_history_points(merged, start, end)
@@ -853,7 +889,9 @@ def fetch_histories_for_lots(core, lots: list[StockCurveLot]) -> dict[tuple[str,
             and cached_history_needs_trade_scale_refresh(lots_by_key.get(key, []), cached_slice)
             and not price_scale_was_checked_today(entry)
         )
-        if entry_covers(cached_points, start, end, entry) and not scale_refresh:
+        recent_start = recent_refresh_start(start, end)
+        needs_recent_refresh = recent_start is not None and not recent_history_was_refreshed(entry)
+        if entry_covers(cached_points, start, end, entry) and not scale_refresh and not needs_recent_refresh:
             histories[key] = history_lookup(cached_slice)
             continue
 
@@ -869,6 +907,8 @@ def fetch_histories_for_lots(core, lots: list[StockCurveLot]) -> dict[tuple[str,
                 fetch_ranges.append((start, first_cached - timedelta(days=1)))
             if end > last_cached:
                 fetch_ranges.append((last_cached + timedelta(days=1), end))
+            if needs_recent_refresh and recent_start is not None:
+                fetch_ranges.append((recent_start, end))
         pending[key] = {
             "ticker": ticker,
             "currency": currency,
@@ -880,6 +920,7 @@ def fetch_histories_for_lots(core, lots: list[StockCurveLot]) -> dict[tuple[str,
             "fetched_points": [],
             "lots": lots_by_key.get(key, []),
             "replace_cached_range": scale_refresh,
+            "needs_recent_refresh": needs_recent_refresh,
         }
         for range_start, range_end in fetch_ranges:
             if range_end >= range_start:
@@ -927,7 +968,7 @@ def fetch_histories_for_lots(core, lots: list[StockCurveLot]) -> dict[tuple[str,
             merged = merge_cache_points(cached_points, fetched_points)
         sliced_history = history_lookup(slice_history_points(merged, start, end))
         price_scale_mismatch = history_needs_trade_scale_runtime_adjustment(item.get("lots") or [], sliced_history)
-        securities[cache_key] = {
+        next_entry = {
             "ticker": clean_text(ticker),
             "currency": clean_text(currency_raw),
             "fetched_at": date.today().isoformat(),
@@ -935,6 +976,10 @@ def fetch_histories_for_lots(core, lots: list[StockCurveLot]) -> dict[tuple[str,
             "price_scale_mismatch": price_scale_mismatch,
             "points": serialize_history_points(merged),
         }
+        if item.get("needs_recent_refresh") and fetched_points:
+            next_entry["recent_refreshed_at"] = date.today().isoformat()
+            next_entry["recent_refresh_version"] = RECENT_HISTORY_REFRESH_VERSION
+        securities[cache_key] = next_entry
         histories[key] = sliced_history
     if should_save:
         save_history_cache(cache)
@@ -1374,6 +1419,68 @@ def trade_cash_flows_by_currency(
     return flows_by_currency
 
 
+def lot_open_buy_amount(lot: StockCurveLot) -> float:
+    if lot.is_short:
+        return 0.0
+    entry_fee = lot.entry_fee if lot.entry_fee is not None else lot.fee
+    return max(abs(lot.quantity) * lot.open_price + abs(entry_fee or 0.0), 0.0)
+
+
+def lot_open_sell_amount(lot: StockCurveLot) -> float:
+    if not lot.is_short:
+        return 0.0
+    entry_fee = lot.entry_fee if lot.entry_fee is not None else lot.fee
+    gross = abs(lot.quantity) * lot.open_price
+    return max(gross - abs(entry_fee or 0.0), 0.0)
+
+
+def lot_close_buy_amount(lot: StockCurveLot, history: dict[date, float]) -> float:
+    if not lot.is_short:
+        return 0.0
+    return max(lot_open_sell_amount(lot) - realized_pnl_for_curve(lot, history), 0.0)
+
+
+def lot_close_sell_amount(lot: StockCurveLot, history: dict[date, float]) -> float:
+    if lot.is_short:
+        return 0.0
+    return max(lot_open_buy_amount(lot) + realized_pnl_for_curve(lot, history), 0.0)
+
+
+def stock_trade_amounts_by_currency(
+    lots: list[StockCurveLot],
+    histories: dict[tuple[str, str], dict[date, float]],
+    events: list[RealizedCurveEvent],
+) -> dict[str, dict[date, DailyTradeAmounts]]:
+    amounts_by_currency: dict[str, dict[date, DailyTradeAmounts]] = {}
+
+    def add_amount(currency: str, day: date, *, buy: float = 0.0, sell: float = 0.0) -> None:
+        by_day = amounts_by_currency.setdefault(currency, {})
+        current = by_day.get(day, DailyTradeAmounts())
+        by_day[day] = DailyTradeAmounts(current.buy + buy, current.sell + sell)
+
+    for lot in lots:
+        history = histories.get((lot.ticker, lot.currency), {})
+        add_amount(
+            lot.currency,
+            lot.open_date,
+            buy=lot_open_buy_amount(lot),
+            sell=lot_open_sell_amount(lot),
+        )
+        if lot.close_date:
+            add_amount(
+                lot.currency,
+                lot.close_date,
+                buy=lot_close_buy_amount(lot, history),
+                sell=lot_close_sell_amount(lot, history),
+            )
+    for event in events:
+        if event.pnl >= 0:
+            add_amount(event.currency, event.event_date, sell=float(event.pnl))
+        else:
+            add_amount(event.currency, event.event_date, buy=abs(float(event.pnl)))
+    return amounts_by_currency
+
+
 def principal_basis_by_currency(
     lots: list[StockCurveLot],
     histories: dict[tuple[str, str], dict[date, float]],
@@ -1417,6 +1524,7 @@ def build_historical_curve_series(core, rows: list[tuple[int, dict[int, object]]
     stock_snapshots: dict[date, dict[tuple[str, str], dict[str, object]]] = {}
     dates_by_currency = point_dates_for_currency(lots, histories, events)
     cash_flows_by_currency = trade_cash_flows_by_currency(lots, histories, events)
+    trade_amounts_by_currency = stock_trade_amounts_by_currency(lots, histories, events)
     principal_by_currency = principal_basis_by_currency(lots, histories, events, dates_by_currency)
     series_list: list[dict[str, object]] = []
     for currency, days in sorted(dates_by_currency.items()):
@@ -1425,6 +1533,11 @@ def build_historical_curve_series(core, rows: list[tuple[int, dict[int, object]]
         currency_lots = [lot for lot in lots if lot.currency == currency]
         currency_events = [event for event in events if event.currency == currency]
         points: list[dict[str, object]] = []
+        previous_mark_by_lot: dict[int, float] = {}
+        previous_total_pnl: float | None = None
+        previous_holding_market_value = 0.0
+        cumulative_buy_amount = 0.0
+        cumulative_sell_amount = 0.0
         for day in sorted(days):
             realized_total = sum(
                 realized_pnl_for_curve(lot, histories.get((lot.ticker, lot.currency), {}))
@@ -1467,13 +1580,15 @@ def build_historical_curve_series(core, rows: list[tuple[int, dict[int, object]]
                     net_flow=event_flow,
                 )
             unrealized_total = 0.0
+            daily_float_total = 0.0
             active_capital = 0.0
             active_market_value = 0.0
+            active_formula_market_value = 0.0
             has_active_position = False
             has_priced_position = False
             closed_on_day = any(lot.close_date == day for lot in currency_lots)
             event_on_day = any(event.event_date == day for event in currency_events)
-            for lot in currency_lots:
+            for lot_index, lot in enumerate(currency_lots):
                 if not (lot.open_date <= day and (lot.close_date is None or day < lot.close_date)):
                     continue
                 has_active_position = True
@@ -1481,6 +1596,8 @@ def build_historical_curve_series(core, rows: list[tuple[int, dict[int, object]]
                 if day <= lot.open_date:
                     opening_market_value = lot.open_price * abs(lot.quantity)
                     active_market_value += opening_market_value
+                    active_formula_market_value += -opening_market_value if lot.is_short else opening_market_value
+                    previous_mark_by_lot[lot_index] = lot.open_price
                     add_stock_snapshot_value(
                         stock_values,
                         ticker=lot.ticker,
@@ -1504,8 +1621,12 @@ def build_historical_curve_series(core, rows: list[tuple[int, dict[int, object]]
                     price = history_price_on_trade_scale(lot, price, history)
                 market_value = price * abs(lot.quantity)
                 active_market_value += market_value
+                active_formula_market_value += -market_value if lot.is_short else market_value
                 floating = unrealized_pnl(lot, price)
                 unrealized_total += floating
+                reference_price = previous_mark_by_lot.get(lot_index, lot.open_price)
+                daily_float_total += floating - unrealized_pnl(lot, reference_price)
+                previous_mark_by_lot[lot_index] = price
                 add_stock_snapshot_value(
                     stock_values,
                     ticker=lot.ticker,
@@ -1524,24 +1645,45 @@ def build_historical_curve_series(core, rows: list[tuple[int, dict[int, object]]
             if stock_values:
                 day_snapshot = stock_snapshots.setdefault(day, {})
                 day_snapshot.update(stock_values)
+            day_amounts = trade_amounts_by_currency.get(currency, {}).get(day, DailyTradeAmounts())
+            daily_buy_amount = float(day_amounts.buy or 0.0)
+            daily_sell_amount = float(day_amounts.sell or 0.0)
+            cumulative_buy_amount += daily_buy_amount
+            cumulative_sell_amount += daily_sell_amount
+            total_pnl = active_formula_market_value + cumulative_sell_amount - cumulative_buy_amount
+            daily_total = total_pnl if previous_total_pnl is None else total_pnl - previous_total_pnl
+            return_basis = previous_holding_market_value + daily_buy_amount
+            external_flow = daily_buy_amount - daily_sell_amount
             point = {
                 "date": date_label(day),
                 "iso": day.isoformat(),
                 "serial": excel_serial(day),
-                "value": realized_total + unrealized_total,
+                "value": total_pnl,
                 "float_value": unrealized_total,
+                "pure_float_value": unrealized_total,
+                "daily_float_value": daily_float_total,
+                "daily_total_value": daily_total,
                 "realized_value": realized_total,
-                "total_value": realized_total + unrealized_total,
+                "total_value": total_pnl,
+                "pure_total_value": total_pnl,
+                "account_equity": active_market_value,
+                "holding_market_value": active_formula_market_value,
+                "daily_buy_amount": daily_buy_amount,
+                "daily_sell_amount": daily_sell_amount,
+                "cumulative_buy_amount": cumulative_buy_amount,
+                "cumulative_sell_amount": cumulative_sell_amount,
+                "return_basis": return_basis,
             }
+            previous_total_pnl = total_pnl
+            previous_holding_market_value = active_market_value
             if active_capital > EPSILON:
                 point["capital"] = active_capital
             elif closed_on_day:
                 point["capital"] = 0.0
             if active_market_value > EPSILON:
                 point["market_value"] = active_market_value
-            trade_cash_flow = cash_flows_by_currency.get(currency, {}).get(day, 0.0)
-            if abs(trade_cash_flow) > EPSILON:
-                point["net_flow"] = -trade_cash_flow
+            if abs(external_flow) > EPSILON:
+                point["net_flow"] = external_flow
             principal = principal_by_currency.get(currency, {}).get(day)
             if principal is not None and principal > EPSILON:
                 point["principal"] = principal

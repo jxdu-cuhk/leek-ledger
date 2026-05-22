@@ -106,7 +106,7 @@ class HoldingsOverviewTests(unittest.TestCase):
                     "floatPnlCny": 10,
                     "dailyPnlCny": 1,
                     "count": 2,
-                }
+                },
             }
         )
 
@@ -117,35 +117,31 @@ class HoldingsOverviewTests(unittest.TestCase):
         self.assertEqual(metrics["daily_pnl"], 1)
         self.assertEqual(metrics["count"], 2)
 
-    def test_render_holdings_account_panel_uses_selectable_realized_ranges(self):
+    def test_render_holdings_account_panel_uses_current_holding_totals(self):
         html = render_holdings_account_panel(
-            {"count": 1, "asset": 100.0, "market_value": 100.0, "cost": 80.0, "float_pnl": 20.0, "daily_pnl": 2.0},
             {
-                "active": "month",
-                "ranges": {
-                    "month": {"label": "5月已实现盈亏", "pnl": 12.0, "capital": 100.0, "rate": 0.12, "points": []},
-                    "three-month": {"label": "近三月已实现盈亏", "pnl": 30.0, "capital": 200.0, "rate": 0.15, "points": []},
-                    "year": {"label": "本年已实现盈亏", "pnl": 60.0, "capital": 300.0, "rate": 0.2, "points": []},
-                },
+                "count": 1,
+                "asset": 100.0,
+                "market_value": 100.0,
+                "cost": 80.0,
+                "float_pnl": 20.0,
+                "daily_pnl": 2.0,
             },
+            {},
         )
 
         self.assertIn("holdings-account-panel", html)
         self.assertIn("持仓总资产", html)
         self.assertIn('data-reporting-money-cny="100.000000"', html)
+        self.assertIn('data-reporting-money-cny="20.000000"', html)
+        self.assertIn("+25.00%", html)
         self.assertIn("折{currency}，不含现金和卖出认沽占用", html)
         self.assertIn("不含现金和卖出认沽占用", html)
         self.assertIn("含卖出认沽占用", html)
-        self.assertIn("当日持仓浮盈变动", html)
-        self.assertIn("data-holdings-reference-card", html)
-        self.assertIn(">现持仓浮盈<", html)
-        self.assertIn('data-holdings-range="day"', html)
-        self.assertIn('data-holdings-range="month"', html)
-        self.assertIn('data-holdings-range="three-month"', html)
-        self.assertIn('data-holdings-range="year"', html)
-        self.assertIn("5月已实现盈亏", html)
-        self.assertIn("近三月已实现盈亏", html)
-        self.assertIn("本年已实现盈亏", html)
+        self.assertIn("当日盈亏", html)
+        self.assertNotIn("data-holdings-reference-card", html)
+        self.assertNotIn(">现持仓浮盈<", html)
+        self.assertNotIn("已实现", html)
 
     def test_reference_float_metrics_builds_selectable_unrealized_ranges(self):
         row = {
@@ -187,6 +183,57 @@ class HoldingsOverviewTests(unittest.TestCase):
         self.assertIn("three-month", metrics["ranges"])
         self.assertIn("year", metrics["ranges"])
         self.assertEqual(metrics["ranges"]["month"]["label"], "5月现持仓浮盈")
+        self.assertAlmostEqual(metrics["ranges"]["month"]["pnl"], 60.0)
+
+    def test_reference_float_range_uses_raw_live_float_after_realized_cost_adjustments(self):
+        stock_row = {
+            1: Cell("买入"),
+            2: Cell(date(2026, 5, 1)),
+            4: Cell(None),
+            5: Cell("600000"),
+            6: Cell("现股"),
+            8: Cell(10),
+            9: Cell(100),
+            11: Cell(1),
+            12: Cell(1001),
+            20: Cell("人民币"),
+        }
+        closed_call_row = {
+            1: Cell("卖出"),
+            2: Cell(date(2026, 5, 2)),
+            3: Cell(date(2026, 5, 29)),
+            4: Cell(date(2026, 5, 6)),
+            5: Cell("600000"),
+            6: Cell("认购"),
+            7: Cell(120),
+            8: Cell(1),
+            9: Cell(0.3),
+            10: Cell(0.1),
+            11: Cell(0),
+            12: Cell(1000),
+            19: Cell(100),
+            20: Cell("人民币"),
+        }
+        history = {
+            ("600000", "人民币"): {
+                date(2026, 5, 1): 100.0,
+                date(2026, 5, 7): 106.0,
+            }
+        }
+
+        with (
+            patch("trade_tracker.holdings_overview.date") as mock_date,
+            patch("trade_tracker.holdings_overview.current_fx_rates_to_cny", return_value={"人民币": 1.0}),
+            patch("trade_tracker.holdings_overview.fetch_histories_for_lots", return_value=history),
+        ):
+            mock_date.today.return_value = date(2026, 5, 7)
+            mock_date.side_effect = lambda *args, **kwargs: date(*args, **kwargs)
+            metrics = reference_float_metrics(
+                FakeCore(),
+                [(2, stock_row), (3, closed_call_row)],
+                {"count": 1, "asset": 1080.0, "cost": 981.0, "float_pnl": 79.0, "daily_pnl": 20.0},
+            )
+
         self.assertAlmostEqual(metrics["ranges"]["month"]["pnl"], 60.0)
 
 

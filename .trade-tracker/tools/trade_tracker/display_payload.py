@@ -181,6 +181,74 @@ def holdings_payload(core, rows: list[tuple[int, dict[int, object]]], data: dict
     }
 
 
+def latest_curve_pnl_by_currency(data: dict[str, object]) -> dict[str, dict[str, float]]:
+    totals: dict[str, dict[str, float]] = {}
+    for series in data.get("curve_series", []) or []:
+        if not isinstance(series, dict):
+            continue
+        currency = clean_text(series.get("currency"))
+        points = [point for point in series.get("points", []) or [] if isinstance(point, dict)]
+        if not currency or not points:
+            continue
+        latest = max(points, key=lambda point: clean_text(point.get("iso")) or clean_text(point.get("date")))
+        total = parse_display_number(latest.get("total_value"))
+        if total is None:
+            total = parse_display_number(latest.get("value"))
+        realized = parse_display_number(latest.get("realized_value"))
+        float_pnl = parse_display_number(latest.get("float_value"))
+        totals[currency] = {
+            "total": float(total) if total is not None else 0.0,
+            "realized": float(realized) if realized is not None else 0.0,
+            "floatPnl": float(float_pnl) if float_pnl is not None else 0.0,
+        }
+    return totals
+
+
+def account_pnl_payload(holding_payload: dict[str, object], data: dict[str, object], rates: dict[str, float]) -> dict[str, object]:
+    curve_by_currency = latest_curve_pnl_by_currency(data)
+    by_currency: dict[str, dict[str, object]] = {}
+    currencies = set(curve_by_currency)
+    currencies.update(str(currency) for currency in holding_payload.get("byCurrency", {}) if currency)
+    total_realized_cny = 0.0
+    total_float_cny = 0.0
+    total_pnl_cny = 0.0
+    for currency in sorted(currencies):
+        rate = rate_for_currency(rates, currency)
+        holding_bucket = holding_payload.get("byCurrency", {}).get(currency, {})
+        holding_float = 0.0
+        if isinstance(holding_bucket, dict):
+            holding_float = float(holding_bucket.get("floatPnl") or 0.0)
+        curve_bucket = curve_by_currency.get(currency, {})
+        realized = float(curve_bucket.get("realized", 0.0))
+        float_pnl = float(curve_bucket.get("floatPnl", holding_float))
+        total = float(curve_bucket.get("total", holding_float))
+        realized_cny = realized * rate
+        float_cny = float_pnl * rate
+        total_cny = total * rate
+        by_currency[currency] = {
+            "currency": currency,
+            "rateToCny": rate,
+            "realized": realized,
+            "floatPnl": float_pnl,
+            "totalPnl": total,
+            "cny": {
+                "realized": realized_cny,
+                "floatPnl": float_cny,
+                "totalPnl": total_cny,
+            },
+        }
+        total_realized_cny += realized_cny
+        total_float_cny += float_cny
+        total_pnl_cny += total_cny
+    return {
+        "totalPnlCny": total_pnl_cny,
+        "realizedPnlCny": total_realized_cny,
+        "holdingFloatPnlCny": total_float_cny,
+        "byCurrency": by_currency,
+        "basis": "总收益曲线最新点同口径累计总盈亏；日统计统一使用当日盈亏合计。",
+    }
+
+
 def realized_daily_payload(core, rows: list[tuple[int, dict[int, object]]], rates: dict[str, float]) -> dict[str, object]:
     try:
         trades = build_realized_trades(core, rows)
@@ -462,6 +530,7 @@ def build_display_payload(core, rows: list[tuple[int, dict[int, object]]], data:
     holding_payload = holdings_payload(core, rows, data)
     realized = realized_payload(core, rows, rates)
     option_quality = option_capital_quality(core, rows, rates)
+    account_pnl = account_pnl_payload(holding_payload, data, rates)
     daily_by_currency = {
         currency: {
             "currency": currency,
@@ -478,6 +547,7 @@ def build_display_payload(core, rows: list[tuple[int, dict[int, object]]], data:
         "holdings": holding_payload["rows"],
         "holdingsTotals": holding_payload["totals"],
         "holdingsByCurrency": holding_payload["byCurrency"],
+        "accountPnl": account_pnl,
         "capital": capital_payload(holding_payload, realized, option_quality, rates),
         "dataQuality": data_quality_payload(holding_payload, option_quality),
         "tags": state.TRANSACTION_TAGS_PAYLOAD if isinstance(state.TRANSACTION_TAGS_PAYLOAD, dict) else {},

@@ -49,7 +49,7 @@ class CapitalQualityTests(unittest.TestCase):
         self.assertIn("资金口径 / 数据质量", updated)
         self.assertIn("资金口径待补", updated)
         self.assertLess(updated.index("当前持仓"), updated.index("资金口径 / 数据质量"))
-        self.assertLess(updated.index("资金口径 / 数据质量"), updated.index("未平仓期权"))
+        self.assertLess(updated.index("未平仓期权"), updated.index("资金口径 / 数据质量"))
         self.assertEqual(updated, updated_again)
 
 
