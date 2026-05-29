@@ -22,6 +22,10 @@ class DailyPnlHistoryTests(unittest.TestCase):
                     "date": "2026-05-22",
                     "holdingFloatCny": 152.0,
                     "byCurrency": {
+                        "人民币": {"native": 999.0, "cny": 999.0, "rateToCny": 1.0},
+                        "港币": {"native": 999.0, "cny": 865.0, "rateToCny": 0.8667},
+                    },
+                    "holdingFloatByCurrency": {
                         "人民币": {"native": 100.0, "cny": 100.0, "rateToCny": 1.0},
                         "港币": {"native": 60.0, "cny": 52.0, "rateToCny": 0.8667},
                     },

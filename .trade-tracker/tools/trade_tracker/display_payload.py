@@ -204,6 +204,37 @@ def latest_curve_pnl_by_currency(data: dict[str, object]) -> dict[str, dict[str,
     return totals
 
 
+def latest_curve_daily_by_currency(data: dict[str, object]) -> dict[str, dict[str, object]]:
+    totals: dict[str, dict[str, object]] = {}
+    for series in data.get("curve_series", []) or []:
+        if not isinstance(series, dict):
+            continue
+        currency = clean_text(series.get("currency"))
+        points = [point for point in series.get("points", []) or [] if isinstance(point, dict)]
+        if not currency or not points:
+            continue
+        sorted_points = sorted(points, key=lambda point: clean_text(point.get("iso")) or clean_text(point.get("date")))
+        latest = sorted_points[-1]
+        previous = sorted_points[-2] if len(sorted_points) >= 2 else None
+        daily_total = parse_display_number(latest.get("daily_total_value"))
+        if daily_total is None:
+            total = parse_display_number(latest.get("total_value"))
+            if total is None:
+                total = parse_display_number(latest.get("value"))
+            previous_total = parse_display_number(previous.get("total_value")) if previous else None
+            if previous_total is None and previous:
+                previous_total = parse_display_number(previous.get("value"))
+            if total is not None:
+                daily_total = float(total) - float(previous_total or 0.0)
+        daily_float = parse_display_number(latest.get("daily_float_value"))
+        totals[currency] = {
+            "date": clean_text(latest.get("iso")) or clean_text(latest.get("date")),
+            "dailyTotal": float(daily_total) if daily_total is not None else 0.0,
+            "dailyFloat": float(daily_float) if daily_float is not None else None,
+        }
+    return totals
+
+
 def account_pnl_payload(holding_payload: dict[str, object], data: dict[str, object], rates: dict[str, float]) -> dict[str, object]:
     curve_by_currency = latest_curve_pnl_by_currency(data)
     by_currency: dict[str, dict[str, object]] = {}
@@ -246,6 +277,55 @@ def account_pnl_payload(holding_payload: dict[str, object], data: dict[str, obje
         "holdingFloatPnlCny": total_float_cny,
         "byCurrency": by_currency,
         "basis": "总收益曲线最新点同口径累计总盈亏；日统计统一使用当日盈亏合计。",
+    }
+
+
+def account_daily_pnl_payload(holding_payload: dict[str, object], data: dict[str, object], rates: dict[str, float]) -> dict[str, object]:
+    curve_daily = latest_curve_daily_by_currency(data)
+    holding_by_currency = holding_payload.get("byCurrency", {})
+    currencies = set(curve_daily)
+    currencies.update(str(currency) for currency in holding_by_currency if currency)
+    by_currency: dict[str, dict[str, object]] = {}
+    holding_float_by_currency: dict[str, dict[str, object]] = {}
+    total_cny = 0.0
+    holding_float_cny = 0.0
+    latest_date = ""
+    for currency in sorted(currencies):
+        rate = rate_for_currency(rates, currency)
+        holding_bucket = holding_by_currency.get(currency, {}) if isinstance(holding_by_currency, dict) else {}
+        holding_native = 0.0
+        if isinstance(holding_bucket, dict):
+            holding_native = float(holding_bucket.get("dailyPnl") or 0.0)
+        curve_bucket = curve_daily.get(currency, {})
+        native = float(curve_bucket.get("dailyTotal", holding_native))
+        cny = native * rate
+        total_cny += cny
+        holding_cny = holding_native * rate
+        holding_float_cny += holding_cny
+        bucket_date = clean_text(curve_bucket.get("date"))
+        if bucket_date > latest_date:
+            latest_date = bucket_date
+        by_currency[currency] = {
+            "currency": currency,
+            "native": native,
+            "cny": cny,
+            "rateToCny": rate,
+            "source": "curve" if currency in curve_daily else "holdings",
+        }
+        holding_float_by_currency[currency] = {
+            "currency": currency,
+            "native": holding_native,
+            "cny": holding_cny,
+            "rateToCny": rate,
+            "source": "holdings",
+        }
+    return {
+        "date": latest_date or date.today().isoformat(),
+        "totalCny": total_cny,
+        "holdingFloatCny": holding_float_cny,
+        "byCurrency": by_currency,
+        "holdingFloatByCurrency": holding_float_by_currency,
+        "basis": "账户当日盈亏来自总收益曲线 daily_total_value，包含当天平仓和当前持仓波动；holdingFloat* 保留当前持仓当日浮盈。",
     }
 
 
@@ -515,12 +595,15 @@ def holdings_metrics_from_payload(payload: dict[str, object]) -> dict[str, float
     count = float(totals.get("count") or 0.0)
     if count <= 0:
         return {}
+    daily = payload.get("dailyPnl") if isinstance(payload, dict) else None
+    current_daily = daily.get("current") if isinstance(daily, dict) else {}
+    account_daily = current_daily.get("totalCny") if isinstance(current_daily, dict) else None
     return {
         "asset": float(totals.get("assetCny") or 0.0),
         "market_value": float(totals.get("marketValueCny") or 0.0),
         "cost": float(totals.get("costCny") or 0.0),
         "float_pnl": float(totals.get("floatPnlCny") or 0.0),
-        "daily_pnl": float(totals.get("dailyPnlCny") or 0.0),
+        "daily_pnl": float(account_daily if account_daily is not None else totals.get("dailyPnlCny") or 0.0),
         "count": count,
     }
 
@@ -531,15 +614,7 @@ def build_display_payload(core, rows: list[tuple[int, dict[int, object]]], data:
     realized = realized_payload(core, rows, rates)
     option_quality = option_capital_quality(core, rows, rates)
     account_pnl = account_pnl_payload(holding_payload, data, rates)
-    daily_by_currency = {
-        currency: {
-            "currency": currency,
-            "native": bucket.get("dailyPnl", 0.0),
-            "cny": bucket.get("cny", {}).get("dailyPnl", 0.0),
-            "rateToCny": bucket.get("rateToCny", 1.0),
-        }
-        for currency, bucket in holding_payload["byCurrency"].items()
-    }
+    account_daily = account_daily_pnl_payload(holding_payload, data, rates)
     return {
         "version": 1,
         "generatedDate": date.today().isoformat(),
@@ -552,11 +627,7 @@ def build_display_payload(core, rows: list[tuple[int, dict[int, object]]], data:
         "dataQuality": data_quality_payload(holding_payload, option_quality),
         "tags": state.TRANSACTION_TAGS_PAYLOAD if isinstance(state.TRANSACTION_TAGS_PAYLOAD, dict) else {},
         "dailyPnl": {
-            "current": {
-                "date": date.today().isoformat(),
-                "holdingFloatCny": holding_payload["totals"]["dailyPnlCny"],
-                "byCurrency": daily_by_currency,
-            }
+            "current": account_daily,
         },
         "realized": realized,
         "realizedDaily": realized["daily"],

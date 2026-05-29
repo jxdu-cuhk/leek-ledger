@@ -628,7 +628,7 @@ def render_realized_filter_script() -> str:
               const payloadValue = optionalNumber(currentDaily?.holdingFloatCny);
               if (Number.isFinite(payloadValue)) return payloadValue;
             } else {
-              const payloadCurrency = currentDaily?.byCurrency?.[selectedCurrency];
+              const payloadCurrency = currentDaily?.holdingFloatByCurrency?.[selectedCurrency] || currentDaily?.byCurrency?.[selectedCurrency];
               const payloadValue = optionalNumber(payloadCurrency?.cny);
               if (Number.isFinite(payloadValue)) return payloadValue;
             }

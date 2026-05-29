@@ -11,7 +11,7 @@ TOOLS_DIR = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS_DIR))
 
 from trade_tracker import state
-from trade_tracker.display_payload import build_display_payload
+from trade_tracker.display_payload import build_display_payload, holdings_metrics_from_payload
 
 
 class Cell:
@@ -132,6 +132,40 @@ class DisplayPayloadTests(unittest.TestCase):
         self.assertEqual(payload["holdingsTotals"]["floatPnlCny"], 10)
         self.assertEqual(payload["dailyPnl"]["current"]["holdingFloatCny"], 1)
         self.assertEqual(payload["dailyPnl"]["current"]["byCurrency"]["人民币"]["native"], 1)
+        self.assertEqual(payload["dailyPnl"]["current"]["holdingFloatByCurrency"]["人民币"]["native"], 1)
+
+    def test_account_daily_pnl_uses_curve_daily_total_with_closed_trades(self):
+        data = {
+            "holdings": [
+                {
+                    "ticker": "AAA",
+                    "name": "A",
+                    "currency": "人民币",
+                    "market_value": "人民币 100.00",
+                    "all_in_cost": "人民币 80.00",
+                    "float_pnl": "人民币 20.00",
+                    "daily_pnl": "人民币 2.00",
+                }
+            ],
+            "curve_series": [
+                {
+                    "currency": "人民币",
+                    "points": [
+                        {"iso": "2026-05-28", "total_value": 10.0, "daily_total_value": 10.0},
+                        {"iso": "2026-05-29", "total_value": 27.0, "daily_total_value": 17.0},
+                    ],
+                }
+            ],
+        }
+
+        with patch("trade_tracker.display_payload.current_fx_rates_to_cny", return_value={"人民币": 1.0}):
+            payload = build_display_payload(FakeCore(), [], data)
+
+        self.assertEqual(payload["dailyPnl"]["current"]["totalCny"], 17)
+        self.assertEqual(payload["dailyPnl"]["current"]["byCurrency"]["人民币"]["native"], 17)
+        self.assertEqual(payload["dailyPnl"]["current"]["holdingFloatCny"], 2)
+        self.assertEqual(payload["dailyPnl"]["current"]["holdingFloatByCurrency"]["人民币"]["native"], 2)
+        self.assertEqual(holdings_metrics_from_payload(payload)["daily_pnl"], 17)
 
     def test_short_put_reserve_is_exposure_not_account_asset(self):
         data = {

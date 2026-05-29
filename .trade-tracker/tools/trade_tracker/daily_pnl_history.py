@@ -42,7 +42,9 @@ def _current_daily_snapshot(display_payload: dict[str, object]) -> tuple[str, di
     if not isinstance(current, dict):
         return None
     iso = clean_text(current.get("date"))
-    by_currency = current.get("byCurrency")
+    by_currency = current.get("holdingFloatByCurrency")
+    if not isinstance(by_currency, dict):
+        by_currency = current.get("byCurrency")
     if not iso or not isinstance(by_currency, dict):
         return None
     snapshot_by_currency: dict[str, object] = {}

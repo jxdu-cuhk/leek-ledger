@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -29,6 +30,7 @@ PRICE_SCALE_LOWER_BOUND = 0.67
 PRICE_SCALE_UPPER_BOUND = 1.5
 CONSISTENT_SCALE_NORMAL_LOWER_BOUND = 0.88
 CONSISTENT_SCALE_NORMAL_UPPER_BOUND = 1.12
+FEE_TOLERANCE = 0.1
 
 
 @dataclass(frozen=True)
@@ -405,6 +407,47 @@ def imported_trade_source_from_note(note: object) -> str:
     return clean_text(text[len(prefix) : text.find(suffix)])
 
 
+def parse_note_fee_amount(text: str, patterns: tuple[str, ...]) -> float | None:
+    for pattern in patterns:
+        match = re.search(pattern, text)
+        if not match:
+            continue
+        value = parse_float(match.group(1).replace(",", ""))
+        if value is not None:
+            return abs(float(value))
+    return None
+
+
+def infer_entry_fee_from_note(note: object, total_fee: float) -> float:
+    if total_fee <= EPSILON:
+        return 0.0
+    text = clean_text(note)
+    if not text:
+        return total_fee
+    amount = r"([0-9][0-9,]*(?:\.\d+)?)"
+    sell_fee = parse_note_fee_amount(
+        text,
+        (
+            rf"(?:卖出税费|卖出费用|平仓费用)[^；。]*?本行分摊\s*{amount}",
+            rf"(?:卖出税费|卖出费用|平仓费用)[^0-9]{{0,20}}{amount}",
+            rf"(?:卖出税费|卖出费用|平仓费用)[^；。]*?(?:为|=|：|:)\s*{amount}",
+        ),
+    )
+    if sell_fee is not None and sell_fee <= total_fee + FEE_TOLERANCE:
+        return max(total_fee - sell_fee, 0.0)
+    buy_fee = parse_note_fee_amount(
+        text,
+        (
+            rf"(?:原买入费用|买入费用)[^；。]*?(?:保留|分摊|为|=|：|:)\s*{amount}",
+        ),
+    )
+    if buy_fee is not None:
+        if abs(total_fee - buy_fee) <= FEE_TOLERANCE:
+            return total_fee
+        return min(buy_fee, total_fee)
+    return total_fee
+
+
 def stock_lot_from_row(core, cells: dict[int, object]) -> StockCurveLot | None:
     event = raw_text_value(core, cells, 6)
     if event not in STOCK_EVENTS:
@@ -428,6 +471,8 @@ def stock_lot_from_row(core, cells: dict[int, object]) -> StockCurveLot | None:
     close_date = excel_serial_to_date(cell_raw(cells, 4))
     close_price = raw_number(cells, 10)
     fee = abs(raw_number(cells, 11) or 0.0)
+    note = raw_text_value(core, cells, 18)
+    entry_fee = infer_entry_fee_from_note(note, fee)
     capital = raw_number(cells, 12)
     if capital is None or abs(capital) <= EPSILON:
         capital = abs(float(quantity) * open_price) + fee
@@ -454,10 +499,10 @@ def stock_lot_from_row(core, cells: dict[int, object]) -> StockCurveLot | None:
         open_price=float(open_price),
         close_price=float(close_price) if close_price is not None else None,
         fee=fee,
-        entry_fee=fee,
+        entry_fee=entry_fee,
         capital=abs(float(capital)),
         realized_pnl=realized_pnl,
-        source=imported_trade_source_from_note(raw_text_value(core, cells, 18)),
+        source=imported_trade_source_from_note(note),
     )
 
 
@@ -1594,20 +1639,25 @@ def build_historical_curve_series(core, rows: list[tuple[int, dict[int, object]]
                 has_active_position = True
                 active_capital += lot.capital
                 if day <= lot.open_date:
-                    opening_market_value = lot.open_price * abs(lot.quantity)
+                    current_trade_price = current_prices.get((lot.ticker, lot.currency)) if day == date.today() else None
+                    mark_price = current_trade_price if current_trade_price is not None else lot.open_price
+                    opening_market_value = mark_price * abs(lot.quantity)
+                    floating = unrealized_pnl(lot, mark_price) if current_trade_price is not None else 0.0
+                    unrealized_total += floating
+                    daily_float_total += floating
                     active_market_value += opening_market_value
                     active_formula_market_value += -opening_market_value if lot.is_short else opening_market_value
-                    previous_mark_by_lot[lot_index] = lot.open_price
+                    previous_mark_by_lot[lot_index] = mark_price
                     add_stock_snapshot_value(
                         stock_values,
                         ticker=lot.ticker,
                         name=resolve_stock_name(core, lot.ticker, lot.currency, lot.currency_raw, name_sources, name_cache),
                         currency=lot.currency,
                         currency_raw=lot.currency_raw,
-                        amount=0.0,
+                        amount=floating,
                         capital=lot.capital,
                         market_value=opening_market_value,
-                        float_amount=0.0,
+                        float_amount=floating,
                         net_flow=lot.capital,
                         position_quantity=lot.quantity,
                     )

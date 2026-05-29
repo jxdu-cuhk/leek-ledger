@@ -170,7 +170,7 @@ class HoldingsDailyTests(unittest.TestCase):
         self.assertEqual(updated["holdings"][0]["daily_pnl"], "人民币 +220.00")
         self.assertNotIn("daily_pnl_text", updated)
 
-    def test_rebuy_after_same_day_sale_of_overnight_holding_keeps_quote_daily_pnl(self):
+    def test_rebuy_after_same_day_sale_of_overnight_holding_uses_entry_price(self):
         today = date(2026, 5, 18)
         data = {
             "holdings": [
@@ -200,8 +200,8 @@ class HoldingsDailyTests(unittest.TestCase):
 
         updated = apply_segmented_daily_pnl(FakeCore(), rows, data, today=today)
 
-        self.assertEqual(updated["holdings"][0]["daily_pnl"], "人民币 +220.00")
-        self.assertNotIn("daily_pnl_text", updated)
+        self.assertEqual(updated["holdings"][0]["daily_pnl"], "人民币 97.90")
+        self.assertEqual(updated["daily_pnl_text"], "人民币 97.90")
 
     def test_us_market_day_rolls_at_new_york_midnight(self):
         before_midnight = datetime(2026, 5, 12, 11, 30, tzinfo=ZoneInfo("Asia/Shanghai"))
